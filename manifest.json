@@ -1,0 +1,49 @@
+{
+  "manifest_version": 2,
+  "name": "Thunderbird EAS Connector",
+  "version": "1.0.0",
+  "description": "Connect Thunderbird to Exchange ActiveSync (EAS) servers",
+  "author": "woehrl",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "thunderbird-eas@woehrl.biz",
+      "strict_min_version": "91.0"
+    }
+  },
+
+  "permissions": [
+    "accountsRead",
+    "accountsFolders",
+    "messagesRead",
+    "messagesDelete",
+    "messagesMove",
+    "messagesImport",
+    "compose",
+    "storage",
+    "alarms",
+    "https://*/*"
+  ],
+
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  },
+
+  "background": {
+    "page": "background/background.html"
+  },
+
+  "options_ui": {
+    "page": "ui/setup/setup.html",
+    "open_in_tab": true
+  },
+
+  "browser_action": {
+    "default_title": "EAS Sync",
+    "default_icon": {
+      "48": "icons/icon-48.png"
+    },
+    "default_popup": "ui/popup/popup.html"
+  }
+}

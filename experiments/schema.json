@@ -1,0 +1,40 @@
+[
+  {
+    "namespace": "easAccount",
+    "description": "Create and remove real Thunderbird account nodes for EAS accounts via XPCOM.",
+    "functions": [
+      {
+        "name": "createAccount",
+        "type": "function",
+        "async": true,
+        "description": "Create a top-level Thunderbird account node for an EAS email address. Returns the account key string.",
+        "parameters": [
+          {
+            "name": "email",
+            "type": "string",
+            "description": "The EAS email address (used as display name and username)."
+          },
+          {
+            "name": "hostname",
+            "type": "string",
+            "description": "The EAS server hostname (used as server hostname to keep accounts unique)."
+          }
+        ]
+      },
+      {
+        "name": "removeAccount",
+        "type": "function",
+        "async": true,
+        "description": "Remove a Thunderbird account node previously created by EAS, including its local mail files.",
+        "parameters": [
+          {
+            "name": "accountKey",
+            "type": "string",
+            "description": "The Thunderbird account key returned by createAccount."
+          }
+        ]
+      }
+    ],
+    "events": []
+  }
+]
