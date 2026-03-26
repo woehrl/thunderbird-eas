@@ -164,6 +164,7 @@ The selected profile controls:
 | `Sync` | Sync email items in a folder (fetch/change/delete) |
 | `SendMail` | Send outgoing email as raw MIME |
 | `MoveItems` | Move message between folders (implemented, not yet wired to UI) |
+| `ItemOperations` | Fetch full MIME for items truncated in Sync response (`Truncated=1`) |
 
 ---
 
@@ -640,7 +641,7 @@ The extension operates entirely within a single Thunderbird instance. The attack
 
 | Issue | Notes |
 |---|---|
-| **Attachments** | Only the text/HTML body is fetched (MIME type 4). Attachments listed in `<Attachments>` are not downloaded. Implement via `ItemOperations/Fetch` or the legacy `GetAttachment` command. |
+| **Attachments** | Incoming: full MIME (Type=4) fetched with a 20 MB `TruncationSize`; items exceeding the limit are re-fetched via `ItemOperations/Fetch`. Outgoing: `compose.onBeforeSend` calls `messenger.compose.listAttachments()`, reads each file as `ArrayBuffer`, and builds a `multipart/mixed` message with base64-encoded parts. Non-ASCII filenames use RFC 5987 encoding. Single-part messages (no attachments) are unchanged. |
 | **Push sync (Ping)** | Currently poll-only. The EAS `Ping` command allows the server to push change notifications, enabling near-real-time sync without constant polling. |
 | **Secure credential storage** | Passwords stored in plaintext in `messenger.storage.local`. Thunderbird's `nsILoginManager` (via Experiments API) is the appropriate solution. |
 

@@ -93,6 +93,7 @@ export function buildSync(syncKey, collectionId, opts = {}) {
   const options = el('AirSync', 'Options',
     el('AirSyncBase', 'BodyPreference',
       tel('AirSyncBase', 'Type', String(BODY_TYPE.MIME)),
+      tel('AirSyncBase', 'TruncationSize', '20971520'), // 20 MB; items beyond this need ItemOperations/Fetch
     ),
   );
 
@@ -170,16 +171,18 @@ export function parseSync(buf) {
       const appData = find(cmd, 'ApplicationData');
       const mimeNode = appData ? find(appData, 'Body') : null;
       // The body Data node contains raw MIME (requested as Type=4)
-      const dataNode = mimeNode ? find(mimeNode, 'Data') : null;
+      const dataNode  = mimeNode ? find(mimeNode, 'Data')      : null;
+      const truncNode = mimeNode ? find(mimeNode, 'Truncated') : null;
       const mime = dataNode ? dataNode.text : null;
       const mimeStr = mime instanceof Uint8Array
         ? new TextDecoder().decode(mime)
         : (mime || '');
 
       const readNode = appData ? find(appData, 'Read') : null;
-      const read = readNode ? readNode.text !== '0' : false;
+      const read      = readNode ? readNode.text !== '0' : false;
+      const truncated = truncNode?.text === '1';
 
-      const entry = { serverId, mime: mimeStr, read };
+      const entry = { serverId, mime: mimeStr, read, truncated };
       if (cmd.tag === 'Add')    result.added.push(entry);
       else                      result.changed.push(entry);
     }
@@ -224,6 +227,65 @@ export function parseMoveItems(buf) {
 // ─────────────────────────────────────────────────────────────────
 
 // No WBXML needed for raw MIME send – handled by client.sendRawMime()
+
+// ─────────────────────────────────────────────────────────────────
+// ItemOperations/Fetch – retrieve full MIME for a single item
+// Used when Sync returns Truncated=1 (item exceeded TruncationSize)
+// ─────────────────────────────────────────────────────────────────
+
+/**
+ * Build an ItemOperations Fetch request for a single email item.
+ * No TruncationSize in BodyPreference = server sends the complete MIME.
+ */
+export function buildItemOperationsFetch(collectionId, serverId) {
+  return encode(
+    el('ItemOperations', 'ItemOperations',
+      el('ItemOperations', 'Fetch',
+        tel('ItemOperations', 'Store', 'Mailbox'),
+        tel('AirSync',         'ServerId',     serverId),
+        tel('GetItemEstimate', 'CollectionId', collectionId),
+        el('ItemOperations', 'Options',
+          el('AirSyncBase', 'BodyPreference',
+            tel('AirSyncBase', 'Type', String(BODY_TYPE.MIME)),
+            // No TruncationSize → server must return full content
+          ),
+        ),
+      )
+    )
+  );
+}
+
+/**
+ * Parse an ItemOperations Fetch response.
+ * Returns { mime: string } or throws on error status.
+ */
+export function parseItemOperationsFetch(buf) {
+  const doc  = decode(buf);
+  const root = doc.tag === 'ItemOperations' ? doc : find(doc, 'ItemOperations');
+  if (!root) throw new Error('ItemOperations/Fetch: missing root element');
+
+  const rootStatus = getText(root, 'Status');
+  if (rootStatus && rootStatus !== '1') {
+    throw new Error(`ItemOperations/Fetch failed: status=${rootStatus}`);
+  }
+
+  const fetchNode = find(root, 'Response', 'Fetch');
+  if (!fetchNode) throw new Error('ItemOperations/Fetch: missing Response/Fetch element');
+
+  const fetchStatus = getText(fetchNode, 'Status');
+  if (fetchStatus && fetchStatus !== '1') {
+    throw new Error(`ItemOperations/Fetch item error: status=${fetchStatus}`);
+  }
+
+  const props    = find(fetchNode, 'Properties');
+  const dataNode = props ? find(props, 'Body', 'Data') : null;
+  const mime     = dataNode?.text;
+  const mimeStr  = mime instanceof Uint8Array
+    ? new TextDecoder().decode(mime)
+    : (mime || '');
+
+  return { mime: mimeStr };
+}
 
 // ─────────────────────────────────────────────────────────────────
 // Settings – DeviceInformation (register client with server)

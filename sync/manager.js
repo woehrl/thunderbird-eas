@@ -97,7 +97,7 @@ export class SyncManager {
 
       // Cancel normal send and use EAS instead
       try {
-        const mime = await this._buildMimeFromDetails(tab, details);
+        const mime = await this._buildMimeFromDetails(tab);
         await sync.sendMail(mime);
         return { cancel: true }; // prevent normal SMTP send
       } catch (e) {
@@ -110,41 +110,81 @@ export class SyncManager {
 
   _findSyncByEmail(email) {
     const addr = email.replace(/.*<(.+)>/, '$1').trim().toLowerCase();
-    for (const [id, sync] of this.syncs) {
+    for (const [, sync] of this.syncs) {
       if (sync.account.username.toLowerCase() === addr) return sync;
       if (sync.account.email?.toLowerCase() === addr)    return sync;
     }
     return null;
   }
 
-  async _buildMimeFromDetails(tab, details) {
-    // Get full compose details including body
-    const full = await messenger.compose.getComposeDetails(tab.id);
-    const lines = [];
-
-    if (full.from)    lines.push(`From: ${full.from}`);
-    if (full.to?.length)  lines.push(`To: ${full.to.join(', ')}`);
-    if (full.cc?.length)  lines.push(`Cc: ${full.cc.join(', ')}`);
-    if (full.bcc?.length) lines.push(`Bcc: ${full.bcc.join(', ')}`);
-    if (full.subject) lines.push(`Subject: ${this._encodeMimeHeader(full.subject)}`);
-    lines.push(`Date: ${new Date().toUTCString()}`);
-    lines.push(`MIME-Version: 1.0`);
-    lines.push(`Message-ID: <${Date.now()}.${Math.random().toString(36).slice(2)}@thunderbird-eas>`);
+  async _buildMimeFromDetails(tab) {
+    // Get full compose details and attachment list
+    const full        = await messenger.compose.getComposeDetails(tab.id);
+    const attachments = await messenger.compose.listAttachments(tab.id);
 
     const isHtml = full.isPlainText === false;
-    if (isHtml) {
-      lines.push(`Content-Type: text/html; charset=UTF-8`);
-      lines.push(`Content-Transfer-Encoding: quoted-printable`);
-      lines.push('');
-      lines.push(this._quotedPrintableEncode(full.body || ''));
-    } else {
-      lines.push(`Content-Type: text/plain; charset=UTF-8`);
-      lines.push(`Content-Transfer-Encoding: quoted-printable`);
-      lines.push('');
-      lines.push(this._quotedPrintableEncode(full.plainTextBody || full.body || ''));
+    const bodyQP = this._quotedPrintableEncode(
+      isHtml ? (full.body || '') : (full.plainTextBody || full.body || '')
+    );
+    const bodyCT = isHtml ? 'text/html' : 'text/plain';
+
+    // ── Top-level message headers ──────────────────────────────
+    const hdr = [];
+    if (full.from)        hdr.push(`From: ${full.from}`);
+    if (full.to?.length)  hdr.push(`To: ${full.to.join(', ')}`);
+    if (full.cc?.length)  hdr.push(`Cc: ${full.cc.join(', ')}`);
+    if (full.bcc?.length) hdr.push(`Bcc: ${full.bcc.join(', ')}`);
+    if (full.subject)     hdr.push(`Subject: ${this._encodeMimeHeader(full.subject)}`);
+    hdr.push(`Date: ${new Date().toUTCString()}`);
+    hdr.push(`MIME-Version: 1.0`);
+    hdr.push(`Message-ID: <${Date.now()}.${Math.random().toString(36).slice(2)}@thunderbird-eas>`);
+
+    // ── No attachments: single-part (original behaviour) ───────
+    if (attachments.length === 0) {
+      hdr.push(`Content-Type: ${bodyCT}; charset=UTF-8`);
+      hdr.push(`Content-Transfer-Encoding: quoted-printable`);
+      hdr.push('');
+      hdr.push(bodyQP);
+      return hdr.join('\r\n');
     }
 
-    return lines.join('\r\n');
+    // ── Attachments present: multipart/mixed ───────────────────
+    const boundary = `_TB_EAS_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
+    hdr.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+
+    // message headers + mandatory blank line before first boundary
+    const out = [hdr.join('\r\n'), ''];
+
+    // Body part
+    out.push([
+      `--${boundary}`,
+      `Content-Type: ${bodyCT}; charset=UTF-8`,
+      `Content-Transfer-Encoding: quoted-printable`,
+      '',
+      bodyQP,
+    ].join('\r\n'));
+
+    // One part per attachment
+    for (const att of attachments) {
+      const file    = await att.getFile();
+      const buf     = await file.arrayBuffer();
+      const ct      = file.type || 'application/octet-stream';
+      const name    = file.name || att.name || 'attachment';
+      const b64     = this._base64Encode(buf);
+      const fnParam = this._encodeAttachmentFilename(name);
+
+      out.push([
+        `--${boundary}`,
+        `Content-Type: ${ct}; name="${name}"`,
+        `Content-Transfer-Encoding: base64`,
+        `Content-Disposition: attachment; ${fnParam}`,
+        '',
+        b64,
+      ].join('\r\n'));
+    }
+
+    out.push(`--${boundary}--`);
+    return out.join('\r\n');
   }
 
   _encodeMimeHeader(subject) {
@@ -162,6 +202,26 @@ export class SyncManager {
     });
   }
 
+  _base64Encode(arrayBuffer) {
+    // Chunked to avoid spread-call stack overflow on large files
+    const bytes = new Uint8Array(arrayBuffer);
+    let binary = '';
+    const chunk = 8192;
+    for (let i = 0; i < bytes.length; i += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    const b64 = btoa(binary);
+    // MIME requires base64 lines to be at most 76 characters
+    return b64.match(/.{1,76}/g)?.join('\r\n') ?? b64;
+  }
+
+  _encodeAttachmentFilename(name) {
+    // ASCII-only: plain filename parameter
+    if (/^[\x20-\x7E]*$/.test(name)) return `filename="${name}"`;
+    // Non-ASCII: RFC 5987 extended parameter
+    return `filename*=UTF-8''${encodeURIComponent(name)}`;
+  }
+
   // ── Message event listeners ───────────────────────────────────
 
   _listenMessages() {
@@ -169,7 +229,7 @@ export class SyncManager {
     if (messenger.messages.onUpdated) {
       messenger.messages.onUpdated.addListener(async (msg, props) => {
         if (!('read' in props)) return;
-        for (const [id, sync] of this.syncs) {
+        for (const [, sync] of this.syncs) {
           await sync.propagateReadFlag(msg.folder?.id, msg.id, props.read);
         }
       });

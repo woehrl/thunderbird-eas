@@ -12,6 +12,7 @@ import { EasClient }    from '../eas/client.js';
 import {
   buildFolderSync, parseFolderSync,
   buildSync, parseSync,
+  buildItemOperationsFetch, parseItemOperationsFetch,
   buildSettings,
 } from '../eas/commands.js';
 import { FOLDER_TYPE, DEVICE_PROFILES }  from '../eas/protocol.js';
@@ -253,8 +254,23 @@ export class AccountSync {
   async _importMessage(item, tbFolder, folderInfo) {
     if (!item.mime || !item.mime.trim()) return;
 
+    // If the Sync response flagged the body as truncated, fetch the full MIME via
+    // ItemOperations/Fetch before importing (no TruncationSize = server sends everything).
+    let mime = item.mime;
+    if (item.truncated) {
+      try {
+        const buf    = await this.client.request('ItemOperations',
+          buildItemOperationsFetch(folderInfo.serverId, item.serverId));
+        const result = parseItemOperationsFetch(buf);
+        if (result.mime) mime = result.mime;
+        console.log('[EAS] Fetched full MIME for truncated item:', item.serverId);
+      } catch (e) {
+        console.warn('[EAS] ItemOperations/Fetch failed, using truncated MIME:', e.message);
+      }
+    }
+
     // Track server ID → TB message (stored in mime header or mapping)
-    const mimeWithHeader = this._injectEasHeader(item.mime, item.serverId, this.account.id);
+    const mimeWithHeader = this._injectEasHeader(mime, item.serverId, this.account.id);
 
     const blob = new Blob([mimeWithHeader], { type: 'message/rfc822' });
     const file = new File([blob], 'message.eml', { type: 'message/rfc822' });

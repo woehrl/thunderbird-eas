@@ -227,7 +227,7 @@ Open the error console (**Ctrl+Shift+J**) and look for `[EAS]` log lines. Common
 
 ## Limitations
 
-- **Attachments** are not yet downloaded (full MIME body is fetched but attachment files are not saved separately).
+- **Incoming attachments** are downloaded as part of the full MIME body (up to 20 MB inline; larger items fetched separately). **Outgoing attachments** are supported — files attached in the compose window are sent as `multipart/mixed` MIME parts.
 - **Calendar and Contacts** sync is not implemented (email only).
 - **Push notifications** (EAS Ping command) are not implemented; sync is poll-based.
 - **Passwords** are stored in plaintext in extension local storage. For production use, see the secure credential storage item in [DEVELOPMENT.md](DEVELOPMENT.md).
