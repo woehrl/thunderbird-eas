@@ -64,6 +64,9 @@ export class SyncManager {
     for (const [id, sync] of this.syncs) {
       const st = this.status.get(id);
       if (st?.syncing) continue;
+      // Skip accounts in quarantine backoff – no network requests, no UI flash.
+      // The account will be retried automatically once the 30-minute window expires.
+      if (sync.isInQuarantineBackoff()) continue;
       this._syncAccount(id, sync);
     }
   }

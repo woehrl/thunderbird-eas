@@ -452,6 +452,8 @@ Many Exchange deployments quarantine **all new device registrations** until an a
 
 Both are caught and translated to `Error('DEVICE_QUARANTINED')`. The `SyncManager` displays a user-friendly message rather than entering a crash/retry loop.
 
+**Quarantine backoff:** Once `DEVICE_QUARANTINED` is first detected, the timestamp is persisted in `account.quarantineDetectedAt`. For the next 30 minutes, subsequent sync cycles skip all network requests and immediately rethrow the error — no new Provision requests are sent to the server. Without this backoff, every 5-minute alarm cycle would send a Phase 1 Provision request, and Exchange generates a fresh quarantine notification email for each one. After 30 minutes the backoff expires and the connector tries again in case the admin approved the device. On the first successful `FolderSync`, `quarantineDetectedAt` is cleared.
+
 ### Device Limit
 
 Exchange enforces a per-user limit on active device partnerships (commonly 5). Exceeding this triggers an email notification to the user. Stale devices must be removed via OWA to free up slots. Each unique `DeviceId` + `DeviceType` combination counts as one device entry.
@@ -524,13 +526,16 @@ All persistent state is stored in `messenger.storage.local` (an IndexedDB-backed
   password:        string,   // plaintext — see security note below
   enabled:         boolean,
   deviceId:        string,   // 32-char hex, shared across all accounts on this install
-  deviceProfileId: string,   // 'iPhone' | 'WindowsOutlook15' | 'Android'
-  policyKey:       string,   // EAS PolicyKey, updated after each provisioning cycle
-  easVersion:      string,   // negotiated EAS protocol version
-  folderSyncKey:   string,   // FolderSync state token ('0' = initial)
-  folders:         { [serverId]: FolderInfo },
-  tbAccountKey:    string?,  // set when Experiments API creates a real TB account node
-  syncInterval:    number,   // minutes between sync cycles
+  deviceProfileId:       string,   // 'Thunderbird' | 'iPhone' | 'WindowsOutlook15' | 'Android' | 'Custom'
+  customProfile:         object?,  // custom profile fields when deviceProfileId === 'Custom'
+  policyKey:             string,   // EAS PolicyKey, updated after each provisioning cycle
+  easVersion:            string,   // negotiated EAS protocol version
+  folderSyncKey:         string,   // FolderSync state token ('0' = initial)
+  folders:               { [serverId]: FolderInfo },
+  tbAccountKey:          string?,  // set when Experiments API creates a real TB account node
+  syncInterval:          number,   // minutes between sync cycles
+  settingsConfirmed:     boolean?, // true after first successful FolderSync; Settings re-sent until then
+  quarantineDetectedAt:  number?,  // Date.now() when quarantine was first detected; null when cleared
 }
 ```
 

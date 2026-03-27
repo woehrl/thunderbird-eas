@@ -61,21 +61,59 @@ export class AccountSync {
 
   // ── Full sync cycle ───────────────────────────────────────────
 
+  static get QUARANTINE_BACKOFF_MS() { return 30 * 60 * 1000; }
+
+  /** Returns true if the account is in the quarantine backoff window. */
+  isInQuarantineBackoff() {
+    return !!(this.account.quarantineDetectedAt &&
+      (Date.now() - this.account.quarantineDetectedAt) < AccountSync.QUARANTINE_BACKOFF_MS);
+  }
+
   async sync() {
     console.log('[EAS] Starting sync for', this.account.username);
+
+    // If the device was quarantined, back off for 30 minutes before retrying.
+    // Real EAS clients (Android, iOS) do not hammer the server; they wait for
+    // admin approval. Without this, every 5-minute alarm cycle triggers a new
+    // Provision request and Exchange generates a fresh quarantine notification email.
+    if (this.isInQuarantineBackoff()) {
+      // Caller (SyncManager.syncAll) should check isInQuarantineBackoff() first and
+      // skip entirely, but guard here too in case sync() is called directly.
+      throw new Error('DEVICE_QUARANTINED');
+    }
+
+    if (this.account.quarantineDetectedAt) {
+      // Backoff expired – try again; admin may have approved the device
+      console.log('[EAS] Quarantine backoff expired – retrying sync');
+    }
 
     // Re-send device metadata on every sync until Exchange confirms it by completing
     // a successful FolderSync. Exchange does not store Settings for quarantined devices,
     // so we must re-send after admin approval to populate OWA device details.
     if (!this.account.settingsConfirmed) {
       try {
-        const profile = DEVICE_PROFILES.find(p => p.id === this.account.deviceProfileId)
-                     || DEVICE_PROFILES[0];
+        const profile = resolveProfile(this.account);
         await this.client.request('Settings', buildSettings(profile, { email: this.account.email || this.account.username }));
       } catch (e) { /* non-fatal */ }
     }
 
-    await this._syncFolders();
+    try {
+      await this._syncFolders();
+      // First successful FolderSync after quarantine – clear the backoff state
+      if (this.account.quarantineDetectedAt) {
+        this.account.quarantineDetectedAt = null;
+        await this._saveAccount();
+        console.log('[EAS] Quarantine cleared – device approved by admin');
+      }
+    } catch (e) {
+      if (e.message === 'DEVICE_QUARANTINED' && !this.account.quarantineDetectedAt) {
+        this.account.quarantineDetectedAt = Date.now();
+        await this._saveAccount();
+        console.warn('[EAS] Device quarantined – backing off for 30 minutes');
+      }
+      throw e;
+    }
+
     const emailFolders = Object.values(this.account.folders || {})
       .filter(f => this._isEmailFolder(f.type));
     console.log('[EAS] Email folders to sync:', emailFolders.map(f => f.displayName).join(', ') || '(none)');

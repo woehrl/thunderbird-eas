@@ -323,6 +323,6 @@ export const DEVICE_PROFILES = [
     model:       'SM-G975F',
     os:          'Android 12',
     osLanguage:  'en-US',
-    friendlyName:'Android Mail',
+    friendlyName:'SM-G975F',  // real Android: FriendlyName = model number (same as Model)
   },
 ];
