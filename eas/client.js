@@ -8,7 +8,7 @@
  *  - Automatic retry after provisioning
  */
 
-import { EAS_VERSION, DEVICE_TYPE, USER_AGENT, DEVICE_PROFILES } from './protocol.js';
+import { EAS_VERSION, DEVICE_TYPE, USER_AGENT, DEVICE_PROFILES, resolveProfile } from './protocol.js';
 
 const MIME_WBXML    = 'application/vnd.ms-sync.wbxml';
 const MIME_RFC822   = 'message/rfc822';
@@ -30,8 +30,7 @@ export class EasClient {
     this.policyKey  = account.policyKey || '0';
     this.easVersion = account.easVersion || EAS_VERSION;
 
-    const profile   = DEVICE_PROFILES.find(p => p.id === account.deviceProfileId)
-                   || DEVICE_PROFILES[0];
+    const profile   = resolveProfile(account);
     this.deviceType  = profile.deviceType;
     this.userAgent   = profile.userAgent;
     this.deviceModel = profile.model;

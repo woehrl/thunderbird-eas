@@ -142,16 +142,23 @@ EAS is a sync protocol carried over HTTPS POST to `/Microsoft-Server-ActiveSync`
 
 Each EAS account has a `deviceProfileId` that selects one of three predefined profiles from `eas/protocol.js`:
 
-| Profile ID | DeviceType | User-Agent | Model | OS |
-|---|---|---|---|---|
-| `iPhone` | `iPhone` | `Apple-iPhone/702.67 (EAS Thunderbird Connector)` | `iPhone` | — |
-| `WindowsOutlook15` | `WindowsOutlook15` | `Outlook/16.0 (16.0.19426.20076; x86)` | `WindowsOutlook15` | — |
-| `Android` | `Android` | `Android-Mail/2026.03.09.884664556.Release` | `SM-G975F` | `Android 12` |
+| Profile ID | DeviceType | User-Agent | Model | OS | OSLanguage |
+|---|---|---|---|---|---|
+| `iPhone` | `iPhone` | `Apple-iPhone/702.67` | `iPhone` | `iOS 17.4.1` | `en-US` |
+| `WindowsOutlook15` | `WindowsOutlook15` | `Outlook/16.0 (16.0.19426.20076; x86)` | `WindowsOutlook15` | — | — |
+| `Android` | `Android` | `Android-Mail/2026.03.09.884664556.Release` | `SM-G975F` | `Android 12` | `en-US` |
+| `Thunderbird` | `Thunderbird` | `Thunderbird/140.9` | `Thunderbird` | — | — |
 
 The selected profile controls:
 - `DeviceType` URL parameter
 - `User-Agent` header
-- `Settings/DeviceInformation` payload (Model, OS, FriendlyName, UserAgent)
+- `Settings/DeviceInformation` payload (Model, OS, OSLanguage, FriendlyName, UserAgent)
+
+**Profile accuracy note:** The `WindowsOutlook15` and `Thunderbird` profiles intentionally send no `OS` or `OSLanguage`. A verified working Outlook 2016 connection on this server shows empty Gerätebetriebssystem and Gerätesprache in OWA — sending those fields would make the profile look *less* like real Outlook. Empty Gerätename is also normal for approved Outlook connections; Exchange simply does not populate it from `FriendlyName` for this device type.
+
+`FriendlyName` is always suffixed with the account email — e.g. `Thunderbird EAS (user@domain)` — so the Exchange admin can identify which user the device belongs to when reviewing quarantined devices in OWA.
+
+`Settings` is re-sent at the start of every sync cycle until `account.settingsConfirmed` is set. This flag is set after the first successful `FolderSync`. Exchange does not reliably persist `Settings/DeviceInformation` for devices in quarantine state, so the re-send ensures the device details appear in OWA after the admin approves the device.
 
 ### Commands Implemented
 

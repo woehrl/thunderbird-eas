@@ -15,7 +15,7 @@ import {
   buildItemOperationsFetch, parseItemOperationsFetch,
   buildSettings,
 } from '../eas/commands.js';
-import { FOLDER_TYPE, DEVICE_PROFILES }  from '../eas/protocol.js';
+import { FOLDER_TYPE, resolveProfile }  from '../eas/protocol.js';
 
 // Root folder name is derived from the account email at runtime — see _ensureRootFolder()
 
@@ -47,9 +47,8 @@ export class AccountSync {
 
     // Register device info with server
     try {
-      const profile = DEVICE_PROFILES.find(p => p.id === this.account.deviceProfileId)
-                   || DEVICE_PROFILES[0];
-      await this.client.request('Settings', buildSettings(profile));
+      const profile = resolveProfile(this.account);
+      await this.client.request('Settings', buildSettings(profile, { email: this.account.email || this.account.username }));
       console.log('[EAS] Device registration OK');
     } catch (e) {
       console.warn('[EAS] Settings/DeviceInformation failed (non-fatal):', e.message);
@@ -64,6 +63,18 @@ export class AccountSync {
 
   async sync() {
     console.log('[EAS] Starting sync for', this.account.username);
+
+    // Re-send device metadata on every sync until Exchange confirms it by completing
+    // a successful FolderSync. Exchange does not store Settings for quarantined devices,
+    // so we must re-send after admin approval to populate OWA device details.
+    if (!this.account.settingsConfirmed) {
+      try {
+        const profile = DEVICE_PROFILES.find(p => p.id === this.account.deviceProfileId)
+                     || DEVICE_PROFILES[0];
+        await this.client.request('Settings', buildSettings(profile, { email: this.account.email || this.account.username }));
+      } catch (e) { /* non-fatal */ }
+    }
+
     await this._syncFolders();
     const emailFolders = Object.values(this.account.folders || {})
       .filter(f => this._isEmailFolder(f.type));
@@ -109,6 +120,12 @@ export class AccountSync {
 
       syncKey = result.syncKey;
       hasMore = false; // FolderSync doesn't page like Sync does
+
+      // First successful FolderSync confirms Exchange stored our Settings metadata
+      if (!this.account.settingsConfirmed) {
+        this.account.settingsConfirmed = true;
+        await this._saveAccount();
+      }
 
       for (const folder of result.added) {
         await this._addFolder(folder);

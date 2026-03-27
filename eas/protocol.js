@@ -243,15 +243,67 @@ export const USER_AGENT = 'Apple-iPhone/702.67 (EAS Thunderbird Connector)';
  * Matching a profile already approved by the Exchange admin avoids the
  * new-device quarantine period.
  */
+/**
+ * Resolve the active device profile for an account.
+ * Returns the matching predefined profile, or the account's customProfile
+ * object when deviceProfileId === 'Custom'.
+ */
+function _detectOS() {
+  const ua = navigator.userAgent;
+  if (ua.includes('Windows'))   return 'Windows';
+  if (ua.includes('Macintosh')) return 'macOS';
+  if (ua.includes('Linux'))     return 'Linux';
+  return '';
+}
+
+function _detectTBVersion() {
+  const m = navigator.userAgent.match(/Thunderbird\/([\d.]+)/i);
+  return m ? m[1] : null;
+}
+
+export function resolveProfile(account) {
+  if (account.deviceProfileId === 'Custom' && account.customProfile) {
+    // Spread over the first profile so any unset fields have sensible defaults
+    return { ...DEVICE_PROFILES[0], ...account.customProfile, id: 'Custom' };
+  }
+  const profile = DEVICE_PROFILES.find(p => p.id === account.deviceProfileId) || DEVICE_PROFILES[0];
+  // For the Thunderbird profile, OS, userAgent and label are filled in at runtime
+  // so they reflect the actual installed version and platform.
+  if (profile.id === 'Thunderbird') {
+    const os         = _detectOS();
+    const version    = _detectTBVersion();
+    const osLanguage = navigator.language || '';
+    const ua         = version ? `Thunderbird/${version}` : profile.userAgent;
+    const label      = version
+      ? `Mozilla Thunderbird ${version} (${os || 'Desktop'})`
+      : profile.label;
+    return { ...profile, os, osLanguage, userAgent: ua, label };
+  }
+  return profile;
+}
+
 export const DEVICE_PROFILES = [
   {
+    // Default — honest Thunderbird profile. OS, language, version and label are
+    // filled in at runtime by resolveProfile() from navigator.userAgent / navigator.language.
+    id:          'Thunderbird',
+    label:       'Mozilla Thunderbird 140 (Desktop)',
+    deviceType:  'Thunderbird',
+    userAgent:   'Thunderbird/140.9',
+    model:       'Thunderbird',
+    os:          '',      // filled at runtime
+    osLanguage:  '',      // filled at runtime
+    friendlyName:'Thunderbird',
+  },
+  {
     id:          'iPhone',
-    label:       'iPhone (Thunderbird EAS)',
+    label:       'iPhone (iOS Mail)',
     deviceType:  'iPhone',
-    userAgent:   'Apple-iPhone/702.67 (EAS Thunderbird Connector)',
+    userAgent:   'Apple-iPhone/702.67',
     model:       'iPhone',
-    os:          '',
-    friendlyName:'Thunderbird EAS',
+    os:          'iOS 17.4.1',
+    osLanguage:  'en-US',
+    friendlyName:'iPhone',
   },
   {
     id:          'WindowsOutlook15',
@@ -260,6 +312,7 @@ export const DEVICE_PROFILES = [
     userAgent:   'Outlook/16.0 (16.0.19426.20076; x86)',
     model:       'WindowsOutlook15',
     os:          '',
+    osLanguage:  '',
     friendlyName:'Outlook',
   },
   {
@@ -269,6 +322,7 @@ export const DEVICE_PROFILES = [
     userAgent:   'Android-Mail/2026.03.09.884664556.Release',
     model:       'SM-G975F',
     os:          'Android 12',
+    osLanguage:  'en-US',
     friendlyName:'Android Mail',
   },
 ];

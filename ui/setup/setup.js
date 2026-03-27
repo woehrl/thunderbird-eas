@@ -59,21 +59,61 @@ function log(msg) {
   box.scrollTop = box.scrollHeight;
 }
 
+// ── Custom profile show/hide ──────────────────────────────────────
+
+// Pre-populate custom fields from the iPhone profile as a starting point
+const CUSTOM_DEFAULTS = {
+  'custom-device-type':  'Thunderbird',
+  'custom-model':        'Thunderbird',
+  'custom-user-agent':   'Thunderbird/140.9',
+  'custom-os':           '',
+  'custom-os-language':  '',
+  'custom-friendly-name':'Thunderbird',
+};
+
+$('device-profile').addEventListener('change', () => {
+  const isCustom = $('device-profile').value === 'Custom';
+  $('custom-profile-section').style.display = isCustom ? '' : 'none';
+  if (isCustom) {
+    // Fill defaults only for empty fields so a returning user keeps their values
+    for (const [id, val] of Object.entries(CUSTOM_DEFAULTS)) {
+      if (!$(id).value) $(id).value = val;
+    }
+  }
+});
+
 function getFormData() {
-  return {
+  const profileId = $('device-profile').value;
+  const data = {
     host:            $('host').value.trim(),
     username:        $('username').value.trim(),
     email:           $('email').value.trim() || $('username').value.trim(),
     password:        $('password').value,
-    deviceProfileId: $('device-profile').value,
+    deviceProfileId: profileId,
     syncInterval:    parseInt($('sync-interval').value, 10) || 5,
   };
+  if (profileId === 'Custom') {
+    data.customProfile = {
+      deviceType:   $('custom-device-type').value.trim(),
+      userAgent:    $('custom-user-agent').value.trim(),
+      model:        $('custom-model').value.trim(),
+      os:           $('custom-os').value.trim(),
+      osLanguage:   $('custom-os-language').value.trim(),
+      friendlyName: $('custom-friendly-name').value.trim() || 'Thunderbird EAS',
+    };
+  }
+  return data;
 }
 
 function validate(data) {
   if (!data.host)     return 'EAS server is required';
   if (!data.username) return 'Username is required';
   if (!data.password) return 'Password is required';
+  if (data.deviceProfileId === 'Custom') {
+    if (!data.customProfile.deviceType) return 'Device Type is required for custom profile';
+    if (!data.customProfile.model)      return 'Device Model is required for custom profile';
+    if (!data.customProfile.userAgent)  return 'User-Agent is required for custom profile';
+  }
   return null;
 }
 

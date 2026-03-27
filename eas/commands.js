@@ -291,11 +291,20 @@ export function parseItemOperationsFetch(buf) {
 // Settings – DeviceInformation (register client with server)
 // ─────────────────────────────────────────────────────────────────
 
-export function buildSettings(profile = {}) {
+/**
+ * @param {object} profile   Device profile from DEVICE_PROFILES
+ * @param {object} [opts]
+ * @param {string} [opts.email]  Account email — appended to FriendlyName so the
+ *                               Exchange admin can identify which user to approve
+ */
+export function buildSettings(profile = {}, opts = {}) {
   const model        = profile.model        || 'Thunderbird';
-  const friendlyName = profile.friendlyName || 'Thunderbird EAS';
-  const os           = profile.os           || 'Windows';
+  const os           = profile.os           || '';
+  const osLanguage   = profile.osLanguage   || '';
   const userAgent    = profile.userAgent    || 'Thunderbird-EAS/1.0';
+  // Include email in FriendlyName so OWA shows e.g. "Thunderbird EAS (user@domain)"
+  const baseName     = profile.friendlyName || 'Thunderbird EAS';
+  const friendlyName = opts.email ? `${baseName} (${opts.email})` : baseName;
 
   return encode(
     el('Settings', 'Settings',
@@ -303,7 +312,8 @@ export function buildSettings(profile = {}) {
         el('Settings', 'Set',
           tel('Settings', 'Model',        model),
           tel('Settings', 'FriendlyName', friendlyName),
-          ...(os ? [tel('Settings', 'OS', os)] : []),
+          ...(os         ? [tel('Settings', 'OS',         os)]         : []),
+          ...(osLanguage ? [tel('Settings', 'OSLanguage', osLanguage)] : []),
           tel('Settings', 'UserAgent',    userAgent),
         )
       )

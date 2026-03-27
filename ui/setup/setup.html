@@ -92,6 +92,21 @@
       overflow-y: auto;
       line-height: 1.5;
     }
+    #custom-profile-section {
+      margin-top: 14px;
+      padding: 14px;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      background: #fafafa;
+    }
+    .custom-section-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: #666;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 12px;
+    }
   </style>
 </head>
 <body>
@@ -132,11 +147,51 @@
     <div class="field">
       <label for="device-profile">Device Profile (User-Agent)</label>
       <select id="device-profile">
-        <option value="iPhone">iPhone – Apple-iPhone/702.67 (default)</option>
+        <option value="Thunderbird" selected>Mozilla Thunderbird (Desktop) – detected at runtime</option>
+        <option value="iPhone">iPhone – Apple-iPhone/702.67 (iOS Mail)</option>
         <option value="WindowsOutlook15">Outlook 2016 – Outlook/16.0 (16.0.19426.20076; x86)</option>
         <option value="Android">Android Mail – Android-Mail/2026.03.09… (Samsung)</option>
+        <option value="Custom">Custom…</option>
       </select>
       <div class="hint">Choose a profile already approved by the Exchange admin to skip the quarantine waiting period.</div>
+
+      <div id="custom-profile-section" style="display:none">
+        <div class="custom-section-title">Custom Profile Fields</div>
+        <div class="row">
+          <div class="field">
+            <label for="custom-device-type">Device Type *</label>
+            <input type="text" id="custom-device-type" placeholder="e.g. iPhone">
+            <div class="hint">EAS DeviceType URL parameter</div>
+          </div>
+          <div class="field">
+            <label for="custom-model">Device Model *</label>
+            <input type="text" id="custom-model" placeholder="e.g. iPhone">
+            <div class="hint">Shown as Gerätemodell in OWA</div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="custom-user-agent">User-Agent *</label>
+          <input type="text" id="custom-user-agent" placeholder="e.g. Apple-iPhone/702.67 (EAS Thunderbird Connector)">
+          <div class="hint">HTTP User-Agent header and EAS UserAgent field</div>
+        </div>
+        <div class="row">
+          <div class="field">
+            <label for="custom-os">OS</label>
+            <input type="text" id="custom-os" placeholder="e.g. iOS 17.4.1">
+            <div class="hint">Optional — leave empty to omit</div>
+          </div>
+          <div class="field">
+            <label for="custom-os-language">OS Language</label>
+            <input type="text" id="custom-os-language" placeholder="e.g. en-US">
+            <div class="hint">Optional — leave empty to omit</div>
+          </div>
+        </div>
+        <div class="field">
+          <label for="custom-friendly-name">Friendly Name</label>
+          <input type="text" id="custom-friendly-name" placeholder="e.g. Thunderbird EAS">
+          <div class="hint">Optional base name — account email is appended automatically</div>
+        </div>
+      </div>
     </div>
     <div class="field">
       <label for="sync-interval">Sync Interval (minutes)</label>
