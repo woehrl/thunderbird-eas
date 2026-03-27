@@ -106,7 +106,9 @@ export class AccountSync {
         console.log('[EAS] Quarantine cleared – device approved by admin');
       }
     } catch (e) {
-      if (e.message === 'DEVICE_QUARANTINED' && !this.account.quarantineDetectedAt) {
+      if (e.message === 'DEVICE_QUARANTINED') {
+        // Always refresh the timestamp so the 30-minute backoff restarts from now,
+        // including after a retry following a previous backoff expiry.
         this.account.quarantineDetectedAt = Date.now();
         await this._saveAccount();
         console.warn('[EAS] Device quarantined – backing off for 30 minutes');
@@ -371,7 +373,7 @@ export class AccountSync {
 
   // ── Mark-as-read propagation back to server ────────────────────
 
-  async propagateReadFlag(tbFolderId, tbMessageId, read) {
+  async propagateReadFlag(_tbFolderId, tbMessageId, read) {
     const mapping = await this._getMappingByTbId(tbMessageId);
     if (!mapping) return;
     const folderInfo = this.account.folders?.[mapping.easFolderId];
