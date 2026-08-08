@@ -1,20 +1,25 @@
 # Thunderbird EAS Connector
 
-A Thunderbird add-on that connects to **Exchange ActiveSync (EAS)** servers, letting you read and write email directly from Thunderbird without needing an IMAP/POP3 account. Works with Exchange Online, on-premise Exchange, and any server that speaks the EAS protocol (e.g. `eas.example.com`).
+A Thunderbird add-on that speaks **Exchange ActiveSync (EAS)**, so a mailbox that offers no IMAP access can still be read and written from Thunderbird. Works against on-premise Exchange 2010 and newer and any server implementing EAS 12.1–14.1.
+
+> **Check EWS first.** Thunderbird has had native Exchange support over EWS since 2024/2025 — no add-on, no device partnership, no administrator approval. If your mailbox answers on EWS, a native Exchange account is simpler and more reliable than this add-on in every respect. The setup page has a **Check for EWS first** button that tests it in one click. Only continue here if EWS is unavailable.
+>
+> In Thunderbird's own EWS dialog, the endpoint field wants the **complete URL** — `https://ews.<domain>/EWS/Exchange.asmx`, not just the hostname. A bare host is rejected as an invalid address.
+
+Eine deutschsprachige Schritt-für-Schritt-Anleitung liegt in [ANLEITUNG.md](ANLEITUNG.md).
 
 ---
 
 ## Features
 
-- Full email synchronisation (Inbox, Sent, Drafts, Deleted, custom folders)
-- Outgoing mail via EAS SendMail (no SMTP required)
-- Read-flag changes propagated back to server
-- Automatic EAS provisioning (policy key handshake)
-- Configurable device profile — impersonate Outlook, Android, or iPhone
-- Status popup with per-account colour indicator (green / orange / red)
-- Quarantine detection with user-friendly explanation when admin approval is needed
-- Periodic sync (configurable interval, default 5 minutes)
-- Optional privileged build: EAS accounts appear as dedicated top-level nodes (like IMAP)
+- Email sync for Inbox, Sent, Drafts, Deleted and custom folders
+- Outgoing mail through EAS `SendMail` — no SMTP server required
+- Read-flag and delete changes propagated back to the server
+- **Push** via the EAS `Ping` command with an adaptive heartbeat, plus interval polling as a fallback
+- Autodiscover (V2/JSON with POX fallback) so only the mailbox address is needed
+- Full two-phase provisioning, including the in-band status codes Exchange actually uses
+- Device profiles with verified fingerprints, and a built-in probe that shows which ones the server accepts
+- Privileged build: a real top-level account node, tagged special folders, password stored in Thunderbird's password manager
 
 ---
 
@@ -22,26 +27,25 @@ A Thunderbird add-on that connects to **Exchange ActiveSync (EAS)** servers, let
 
 | Component | Minimum version |
 |---|---|
-| Thunderbird | 91.0 (tested on 140.9.0 ESR) |
-| Exchange Server | Any version supporting EAS 14.0+ |
-| Node.js | 14+ (build only) |
+| Thunderbird | 128.0 (tested on 140.9 ESR) |
+| Exchange | Any version speaking EAS 12.1 or newer |
+| Node.js | 18+ (build only) |
+
+Exchange Online is **not** supported: it has required EAS 16.1 with OAuth 2.0 since 2026, and Basic authentication for EAS there has been permanently disabled since 2023.
 
 ---
 
 ## Installation
 
-### From release
-
-Two builds are published with each release:
+Two builds are produced from identical source:
 
 | File | Description |
 |---|---|
-| `thunderbird-eas-x.y.z-<ts>.xpi` | **Standard** — works out of the box, no configuration needed |
-| `thunderbird-eas-x.y.z-privileged-<ts>.xpi` | **Privileged** — EAS accounts appear as real account nodes; requires one-time about:config change (see below) |
+| `thunderbird-eas-x.y.z-<ts>.xpi` | **Standard** — installs anywhere, files mail under Local Folders |
+| `thunderbird-eas-x.y.z-privileged-<ts>.xpi` | **Privileged** — real account node; needs one about:config change first |
 
-1. Download the `.xpi` of your choice from [Releases](../../releases).
-2. In Thunderbird: **Extras → Add-ons and Themes → gear icon → Install Add-on From File**.
-3. Select the `.xpi` file and confirm.
+1. In Thunderbird: **Tools → Add-ons and Themes → gear icon → Install Add-on From File**
+2. Pick the `.xpi` and confirm.
 
 ### Build from source
 
@@ -49,192 +53,183 @@ Two builds are published with each release:
 git clone https://github.com/woehrl/thunderbird-eas
 cd thunderbird-eas
 
-# Standard build (Local Folders subfolder, works everywhere)
-node package.js
-# → dist/thunderbird-eas-1.0.0-<timestamp>.xpi
-
-# Privileged build (real account node, requires about:config change)
-node package.js --privileged
-# → dist/thunderbird-eas-1.0.0-privileged-<timestamp>.xpi
+node tools/selftest.mjs      # protocol self-test (also runs as part of packaging)
+node package.js              # standard build
+node package.js --privileged # privileged build
 ```
 
-No npm or bundler required. All source is native ES2020 modules.
+No npm, no bundler, no dependencies — plain ES modules and Node's standard library.
 
 ---
 
-## Standard vs Privileged Build
+## Standard vs privileged build
 
-### Standard build
+### Standard
 
-- Works immediately after install, no configuration required
-- Synced folders appear as a named subfolder inside **Local Folders**
-- Suitable for all users
+Works immediately. Mail is filed into a folder named after the account inside **Local Folders**, and the password lives in extension storage.
 
-### Privileged build
+### Privileged
 
-- EAS accounts appear as **dedicated top-level nodes** in the folder pane, identical to IMAP/POP3 accounts
-- Uses the Thunderbird Experiments API (privileged XPCOM code)
-- **Requires a one-time about:config change before installing:**
+The account gets its own top-level node in the folder pane, indistinguishable from an IMAP account:
 
-  1. Open Thunderbird → **Extras → Einstellungen (Settings) → Allgemein (General)** tab
-  2. Scroll to the very bottom → click **Konfigurationseditor (Config Editor)**
-  3. Search for `extensions.experiments.enabled` → double-click to set it to **`true`**
-  4. Close the Config Editor
-  5. Now install the `-privileged` `.xpi`
+- a real `nsIMsgAccount` with its own identity, so the address appears in the compose **From** picker
+- Inbox / Sent / Drafts / Trash carry the proper Thunderbird folder flags, so they get the right icons and behaviour, and sent mail and drafts are filed into the EAS folders rather than Local Folders
+- the password is stored in **Thunderbird's password manager** instead of extension storage, so a primary password protects it
 
-> **Why is this needed?** The `experiment_apis` manifest key must be declared at extension load time — it cannot be opted into at runtime. Thunderbird rejects the entire extension if this key is present and the pref is `false`. The standard build omits this key entirely; the privileged build injects it during packaging. Both builds share identical source code and the same addon ID, so switching between them (install-over, don't remove first) preserves all account data.
+**One-time preparation before installing:**
+
+1. **Tools → Settings → General**, scroll to the bottom, click **Config Editor**
+2. Search `extensions.experiments.enabled`, set it to **`true`**
+3. Install the `-privileged` `.xpi`
+
+> **Why can't this be a toggle?** The `experiment_apis` manifest key is read at extension load time and cannot be requested later. With the pref off, Thunderbird refuses to install an extension declaring it at all — so the key is injected at packaging time into the privileged build only. Both builds share the add-on ID `thunderbird-eas@woehrl.biz`, so installing one over the other keeps all account data.
 
 ---
 
-## Account Setup
+## Account setup
 
-1. Click the **EAS Sync** button in the Thunderbird toolbar (top-right area).
-2. Click **Settings**.
-3. Fill in the form:
+EAS accounts are **not** created through Thunderbird's account wizard — that wizard only knows IMAP, POP3 and Thunderbird's own EWS support. The add-on brings its own page:
 
-| Field | Example | Notes |
+> **Tools → Exchange ActiveSync accounts…**
+
+Alternatively **Tools → Add-ons and Themes → Extensions** → the **wrench icon** on *Thunderbird EAS Connector*. The wrench sits between the enable toggle and the `…` menu — the `…` menu itself only offers Remove and Manage, and the detail view has no Options tab.
+
+If the wrench is greyed out and the Tools entry is missing, the extension's background page failed to start — usually a privileged build installed without `extensions.experiments.enabled = true`. Check the Error Console (Ctrl+Shift+J).
+
+The **EAS Sync** toolbar button (status display and *Sync All*) is not shown by default: right-click the toolbar → **Customise…** → drag the extension's icon in.
+
+1. Open that page
+2. Enter the mailbox address and password
+3. Press **Find server** — Autodiscover fills in the host, or say so if it cannot
+4. Optionally press **Check for EWS first** (see the note at the top)
+5. Pick a device profile, press **Test Connection**, then **Add Account**
+
+### Device profiles
+
+Exchange can restrict which clients may connect through an Allow/Block/Quarantine (ABQ) rule keyed on `DeviceType` and `User-Agent`, and it enforces a per-mailbox limit on device partnerships — commonly five.
+
+A measurement against a production Exchange 2019 in August 2026 returned:
+
+| DeviceType | User-Agent | Result |
 |---|---|---|
-| EAS Server | `eas.example.com` | Hostname only, no `https://`, no port |
-| Username | `user@domain.org` | Usually the full email address |
-| Display Email | *(optional)* | If different from username |
-| Password | ••••••• | Stored in local extension storage |
-| Device Profile | Outlook 2016 | See section below |
-| Sync Interval | `5` | Minutes between syncs |
+| `WindowsOutlook15` | `Outlook/16.0 (…; C2R; x64)` | HTTP 200 |
+| `iPhone` | `Apple-iPhone14C1/2011.223` | HTTP 200 |
+| `Android` | `Android/14.0` | HTTP 403 |
+| `TBSync` | `Thunderbird-EAS/1.0` | HTTP 403 |
 
-4. Click **Test Connection** to verify the server is reachable and credentials are accepted.
-5. Click **Add Account**. The initial sync starts in the background.
+Whether the 403 came from an ABQ rule or from an exhausted device quota was never resolved — a "5 of 5 devices" notification arrived during the run. Either way the default profile is `WindowsOutlook15`, which is verified to be accepted.
 
-### Device Profile
+The profile also decides the protocol version: a client calling itself `WindowsOutlook15` negotiates 14.0, because that is what real Outlook does. Asking for 16.1 under that name is a fingerprint that does not exist anywhere.
 
-Exchange administrators can restrict which device types may connect. Choose a profile that matches what your admin has already approved:
+**Compare device profiles** in the Advanced section sends one minimal FolderSync per profile using the same DeviceId and reports which the server accepts.
 
-| Profile | User-Agent sent | DeviceType |
-|---|---|---|
-| iPhone (default) | `Apple-iPhone/702.67 (EAS Thunderbird Connector)` | `iPhone` |
-| Outlook 2016 | `Outlook/16.0 (16.0.19426.20076; x86)` | `WindowsOutlook15` |
-| Android Mail | `Android-Mail/2026.03.09.884664556.Release` | `Android` |
+> Exchange keys a device partnership on `DeviceId` **and** `DeviceType`. Changing profiles later registers an *additional* device and consumes another quota slot; the old entry has to be deleted in OWA by hand. The same applies to the probe.
 
-The selected profile also controls what is reported in the EAS `Settings/DeviceInformation` command (model, OS, friendly name), so the server sees a consistent device identity.
+### Advanced options
 
-If your organisation uses a **global allow** policy (all devices are trusted by default) the profile does not matter. If it uses **individual approval**, choosing a profile that already has an approved device associated with it may reduce the waiting time — but the server still creates a new device entry because the Device ID is different.
-
----
-
-## Status Indicators
-
-Open the **EAS Sync** popup (toolbar button) to see the current state of each account:
-
-| Dot colour | Badge | Meaning |
-|---|---|---|
-| 🟢 Green | OK | Last sync completed successfully |
-| 🟡 Yellow | Syncing… | Sync in progress |
-| 🟠 Orange | Pending | Device quarantined, waiting for admin approval |
-| 🔴 Red | Error | Sync failed — hover over the row for details |
-| ⚫ Grey | Never synced | No sync has run yet |
-
-The popup polls the background script every 2.5 seconds while open, so status updates appear within a few seconds of any change. Hover over an account row for the full status message as a native tooltip.
-
----
-
-## Device Quarantine
-
-Some Exchange servers place **new devices in quarantine** until an administrator explicitly approves them. This is a server-side security policy and is unrelated to credentials.
-
-**Symptoms:** Orange *Pending* badge in the popup; error console shows `Provision phase1 root children: Status="165"` or `FolderSync status=177`.
-
-**Resolution:**
-1. Log in to **Outlook Web App** (e.g. `mail.yourdomain.com`).
-2. Go to **Options → Phone → Mobile Devices**.
-3. Find the new device entry (shown with the device type you chose, e.g. *iPhone* or *WindowsOutlook15*).
-4. Click the **Allow** (✓) button.
-5. The next sync cycle (within 5 minutes) will succeed automatically — no action needed in Thunderbird.
-
-**Device limit:** Exchange has a per-user limit on connected devices (often 5). If you hit this limit you will receive an email notification. Remove stale devices in the same OWA screen to free up slots.
-
----
-
-## Updating the Add-on
-
-> **Important:** To preserve your Device ID and provisioning state, always **install the new `.xpi` over the existing extension** — do not remove the old one first.
-
-| Method | Effect |
+| Option | Purpose |
 |---|---|
-| ✅ Extras → Install Add-on From File → select new `.xpi` | Thunderbird detects same addon ID, upgrades in-place, all storage preserved |
-| ❌ Remove extension → re-install | Extension storage wiped, new Device ID generated, quarantine restarts |
-
-Both the standard and privileged builds use the addon ID `thunderbird-eas@woehrl.biz`, so you can switch between them with an in-place upgrade.
+| Poll interval | Fallback polling when push is off or unavailable |
+| Sync messages from | `FilterType` — limits how far back the initial sync reaches |
+| Credential encoding | UTF-8 by default. Real Outlook sends Basic credentials as ISO-8859-1; with a non-ASCII password that difference looks exactly like a wrong password |
+| Push (Ping) | Long-poll for changes instead of waiting for the next interval |
 
 ---
 
-## Folder Layout
+## Status indicators
 
-### Standard build
+| Dot | Badge | Meaning |
+|---|---|---|
+| 🟢 | OK | Last sync completed |
+| 🟡 | Syncing… | Sync running |
+| 🟠 | Blocked | Server refused the device, or is throttling — shows the remaining backoff |
+| 🔴 | Error | Sync failed; hover for the message |
+| ⚫ | Never synced | Nothing has run yet |
+
+---
+
+## Quarantine — the normal first outcome
+
+Many Exchange organisations quarantine every new device by default. It looks like success: the account node appears, the full folder tree is created, and the inbox contains exactly one message from "Microsoft Outlook" explaining that access is blocked pending administrator approval. That is Exchange behaving as designed — a quarantined device may provision and fetch its hierarchy, but no content.
+
+That notification is the best diagnostic the protocol offers, because it echoes back what actually arrived on the wire: DeviceType, User-Agent, negotiated protocol version, DeviceId. The decisive field is **Grund für Gerätezugriffsstatus / device access state reason**:
+
+| Reason | Cause | Does another device profile help? |
+|---|---|---|
+| `Global` | Org-wide default access level is Quarantine | No — only an administrator can release it |
+| `Individual` | Per-mailbox or per-device rule | Sometimes |
+| `DeviceRule` | ABQ rule on DeviceType / User-Agent | Yes — try **Compare device profiles** |
+
+To request release, the administrator needs the mailbox, the DeviceId (also shown per account on the setup page) and the DeviceType. Afterwards press **Sync All** in the popup, which clears any pending backoff.
+
+## When the server refuses the device
+
+Symptom: an orange **Blocked** badge, an HTTP 403 or EAS status 126/129/177 in the log — and **no** folder tree at all.
+
+There are two causes and they are fixed in the same place:
+
+1. **ABQ rule** — the DeviceType or User-Agent is not on the allow list. Switch to the `WindowsOutlook15` or `iPhone` profile, or run **Compare device profiles**.
+2. **Device quota exhausted** — Exchange allows a limited number of partnerships per mailbox. Every stale phone and every earlier probe counts.
+
+Both: **OWA → Options → Phone → Mobile Devices**. Approve the new device, or delete the ones you no longer use.
+
+After a refusal the add-on stays quiet for 30 minutes rather than retrying every cycle — otherwise Exchange sends the mailbox owner a fresh quarantine notification for each attempt. **Sync All** in the popup clears the backoff immediately, which is what you want right after approving the device.
+
+---
+
+## Updating
+
+Install the new `.xpi` **over** the existing extension. Removing and re-installing wipes extension storage, which regenerates the DeviceId — Exchange then sees a brand new device, starts a fresh quarantine cycle and consumes another quota slot.
+
+---
+
+## Folder layout
 
 ```
-Local Folders
-└── user@domain.org          ← root folder named after your email
-    ├── Inbox
-    ├── Sent Items
-    ├── Drafts
-    ├── Deleted Items
+Standard build                    Privileged build
+
+Local Folders                     user@domain.org      ← its own account node
+└── user@domain.org               ├── Inbox            ← tagged as the real Inbox
+    ├── Inbox                     ├── Sent Items       ← identity files sent mail here
+    ├── Sent Items                ├── Drafts
+    ├── Drafts                    ├── Deleted Items
+    ├── Deleted Items             └── (custom folders…)
     └── (custom folders…)
-```
-
-### Privileged build
-
-```
-user@domain.org              ← dedicated account node (like IMAP)
-├── Inbox
-├── Sent Items
-├── Drafts
-├── Deleted Items
-└── (custom folders…)
 ```
 
 ---
 
 ## Troubleshooting
 
-### Setup page does not open
+**Everything connects but no mail arrives.** Check the error console (Ctrl+Shift+J) for `[EAS]` lines. If the code page self-test reports an inconsistency at startup, that is the cause — run `node tools/selftest.mjs`.
 
-- Make sure you installed from the `dist/` folder (the timestamped `.xpi`), not from the repo root.
-- Open the error console (**Ctrl+Shift+J**) and look for errors at extension startup.
-- If you installed the privileged build without enabling the pref first, Thunderbird will reject the extension. Enable `extensions.experiments.enabled` in about:config, then reinstall.
+**Test Connection fails.** The host field takes a hostname only, no scheme and no port. `curl -u user:pass -v https://<host>/Microsoft-Server-ActiveSync` is a quick independent check.
 
-### Status popup shows "Never synced" after setup
+**Password with umlauts rejected.** Switch Credential encoding to ISO-8859-1 in the Advanced section.
 
-The first sync runs approximately 6 seconds after the extension loads (alarm delay). Keep the popup open for a few seconds — it will update automatically within one 2.5-second poll cycle after the sync completes.
+**Common status codes**
 
-### FolderSync / Sync errors
-
-Open the error console (**Ctrl+Shift+J**) and look for `[EAS]` log lines. Common status codes:
-
-| Status | Meaning | Action |
+| Status | Meaning | Handling |
 |---|---|---|
-| 142 / 145 | Device not provisioned | Handled automatically |
-| 165 | Device quarantined (provisioning) | Admin approval required (see above) |
-| 177 | Device quarantined (server-specific) | Admin approval required (see above) |
-| 9 / 12 | Sync key mismatch | Handled automatically (reset + retry) |
-
-### Connection test fails
-
-- Verify the hostname contains no `https://` prefix and no port number.
-- Some servers require TLS 1.2+ — this is handled automatically by Gecko's fetch API.
-- Test with curl: `curl -u user:pass -v https://<host>/Microsoft-Server-ActiveSync`
-- Some servers perform TLS renegotiation twice per connection — this is normal and harmless.
+| 142 / 143 / 144 / 145 | Provisioning needed or policy key stale | Automatic: provision, then retry once |
+| 126 / 129 / 177 | ActiveSync disabled for the mailbox, device blocked, or device quota exhausted | 30-minute backoff, admin action required |
+| 165 | `DeviceInformationRequired` — **not** a block | Automatic: device information is sent inside the Provision request |
+| 3 / 9 / 12 / 131 | Sync key invalid | Automatic: collection rebuilt |
+| HTTP 403 | ABQ rule or device quota | See the section above |
+| HTTP 503 | Throttling | Backoff honouring `Retry-After` |
 
 ---
 
 ## Limitations
 
-- **Incoming attachments** are downloaded as part of the full MIME body (up to 20 MB inline; larger items fetched separately). **Outgoing attachments** are supported — files attached in the compose window are sent as `multipart/mixed` MIME parts.
-- **Calendar and Contacts** sync is not implemented (email only).
-- **Push notifications** (EAS Ping command) are not implemented; sync is poll-based.
-- **Passwords** are stored in plaintext in extension local storage. For production use, see the secure credential storage item in [DEVELOPMENT.md](DEVELOPMENT.md).
-- The add-on is **unsigned**. Thunderbird will install it but may show a security warning.
+- **Email only.** Calendar, contacts, tasks and notes are not synced.
+- **Basic authentication only.** No OAuth 2.0, so Exchange Online is out of reach.
+- **Protocol 14.1 at most.** 16.x changed calendar, recurrence and draft handling; negotiating it would mean sending requests this client cannot interpret.
+- **Unsigned.** Thunderbird installs it but shows a warning.
+- **Patents.** Microsoft's EAS patent licensing programme explicitly names client-side implementations. This add-on is a client. That is a situation to be aware of, not legal advice.
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).

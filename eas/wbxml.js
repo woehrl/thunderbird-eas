@@ -1,251 +1,349 @@
 /**
- * WBXML encoder/decoder for Exchange ActiveSync.
+ * WBXML 1.3 encoder/decoder for Exchange ActiveSync.
  *
- * WBXML 1.3 (WAP Binary XML) with EAS code pages.
- * Reference: MS-ASWBXML, WBXML 1.3 spec (WAP-192-WBXML-20010725-a)
+ * Reference: MS-ASWBXML, WAP-192-WBXML-20010725-a.
+ *
+ * EAS uses a fixed 4-byte header and only four global tokens, so this is a
+ * deliberately small subset:
+ *
+ *   03 01 6a 00   version 1.3 | public id 1 | charset UTF-8 | no string table
+ *
+ *   0x00 SWITCH_PAGE  followed by one code page byte
+ *   0x01 END          closes the most recently opened element
+ *   0x03 STR_I        inline NUL-terminated UTF-8 string
+ *   0xC3 OPAQUE       length-prefixed binary blob
+ *
+ * Tag byte: bit 6 (0x40) = has content, bit 7 (0x80) = has attributes.
+ * EAS never uses attributes, but the decoder skips them defensively.
+ *
+ * OPAQUE is not optional: Exchange uses it for policy data in Provision
+ * responses and for MIME bodies.
  */
 
-import { CODE_PAGES, lookupTag, encodeTag, PAGE_BY_NAME } from './protocol.js';
+import { lookupTag, encodeTag, pageIndex } from './codepages.js';
 
-const WBXML_VERSION = 0x03;   // WBXML 1.3
-const PUBLIC_ID     = 0x01;   // Unknown / literal public identifier
-const CHARSET_UTF8  = 0x6A;   // 106 = UTF-8
+const WBXML_VERSION = 0x03;
+const PUBLIC_ID     = 0x01;
+const CHARSET_UTF8  = 0x6A;   // IANA MIBenum 106
 
-// Global tokens
 const T_SWITCH_PAGE = 0x00;
 const T_END         = 0x01;
 const T_ENTITY      = 0x02;
-const T_STR_I       = 0x03;   // Inline string (null-terminated UTF-8)
-const T_STR_T       = 0x83;   // String from string table (we don't use this)
-const T_OPAQUE      = 0xC3;   // Opaque data block
+const T_STR_I       = 0x03;
+const T_LITERAL     = 0x04;
+const T_PI          = 0x43;
+const T_STR_T       = 0x83;
+const T_OPAQUE      = 0xC3;
 
-// Tag token flags
-const HAS_CHILDREN  = 0x40;
+const HAS_CONTENT   = 0x40;
 const HAS_ATTRS     = 0x80;
 const TAG_MASK      = 0x3F;
 
-// ─────────────────────────────────────────────────────────────────
-// Decode WBXML bytes → JS object tree
-// ─────────────────────────────────────────────────────────────────
+/** Guard against a hostile or broken server sending pathological nesting. */
+const MAX_DEPTH = 256;
+
+const _decoder = new TextDecoder('utf-8', { fatal: false });
+const _encoder = new TextEncoder();
+
+// ─────────────────────────────────────────────────────────────────────
+// Decode
+// ─────────────────────────────────────────────────────────────────────
 
 /**
- * Node shape: { ns: pageIndex, tag: string, children: Node[], text: string }
+ * Decode WBXML into a node tree.
+ *
+ * Node shape: { ns, tag, children, text, data }
+ *   ns       code page index the tag was read from
+ *   tag      element name, or `_0x12` when the token is unknown
+ *   text     concatenated inline string content (OPAQUE decoded as UTF-8)
+ *   data     Uint8Array when the content came from an OPAQUE block
+ *
+ * Returns null for an empty body (a legitimate "no changes" Sync response).
  */
 export function decode(buffer) {
+  if (!buffer) return null;
   const bytes = buffer instanceof Uint8Array ? buffer : new Uint8Array(buffer);
-  let pos = 0;
+  if (bytes.length === 0) return null;
 
-  function readByte() { return bytes[pos++]; }
+  let pos = 0;
+  let currentPage = 0;
+
+  function readByte() {
+    if (pos >= bytes.length) throw new Error('WBXML: unexpected end of input');
+    return bytes[pos++];
+  }
 
   function readMbUint() {
     let value = 0;
     let b;
-    do { b = readByte(); value = (value << 7) | (b & 0x7F); } while (b & 0x80);
+    let guard = 0;
+    do {
+      b = readByte();
+      value = (value * 128) + (b & 0x7F);
+      if (++guard > 5) throw new Error('WBXML: multi-byte integer too long');
+    } while (b & 0x80);
     return value;
   }
 
   function readCStr() {
-    let s = '';
-    let b;
-    while ((b = readByte()) !== 0) s += String.fromCharCode(b);
-    return decodeURIComponent(escape(s)); // UTF-8 decode
+    const start = pos;
+    while (pos < bytes.length && bytes[pos] !== 0) pos++;
+    const str = _decoder.decode(bytes.subarray(start, pos));
+    pos++; // consume terminator
+    return str;
   }
 
-  // Header
-  const version   = readByte();  // 0x03
-  const publicId  = readMbUint();
-  const charset   = readMbUint();
-  const strtblLen = readMbUint();
-  pos += strtblLen; // skip string table (EAS never uses it)
+  function readOpaque() {
+    const len = readMbUint();
+    if (pos + len > bytes.length) throw new Error('WBXML: opaque length exceeds body');
+    const data = bytes.subarray(pos, pos + len);
+    pos += len;
+    return data;
+  }
 
+  // ── Header ────────────────────────────────────────────────────────
+  const version = readByte();
   if (version !== WBXML_VERSION) {
-    throw new Error(`Unexpected WBXML version: 0x${version.toString(16)}`);
+    throw new Error(`WBXML: unexpected version 0x${version.toString(16)}`);
   }
+  readMbUint();                      // public identifier
+  readMbUint();                      // charset
+  const strTableLen = readMbUint();  // string table length (EAS: always 0)
+  pos += strTableLen;
 
-  let currentPage = 0;
+  /** Consume the children of an open element into `node`. */
+  function readContent(node, depth) {
+    if (depth > MAX_DEPTH) throw new Error('WBXML: maximum nesting depth exceeded');
 
-  function readNode() {
-    while (pos < bytes.length) {
-      const token = readByte();
+    for (;;) {
+      if (pos >= bytes.length) return;      // truncated body — stop gracefully
+      const token = bytes[pos];
 
-      if (token === T_SWITCH_PAGE) {
-        currentPage = readByte();
-        continue;
-      }
+      if (token === T_END)         { pos++; return; }
+      if (token === T_SWITCH_PAGE) { pos++; currentPage = readByte(); continue; }
 
-      if (token === T_END) return null; // end of parent element
-
-      if (token === T_STR_I) {
-        // Bare inline string (text node at the top level - unusual but handle)
-        return { ns: -1, tag: '#text', children: [], text: readCStr() };
-      }
-
-      if (token === T_ENTITY) {
-        readMbUint(); // skip entity code point
-        continue;
-      }
+      if (token === T_STR_I) { pos++; node.text += readCStr(); continue; }
 
       if (token === T_OPAQUE) {
-        const len = readMbUint();
-        const data = bytes.slice(pos, pos + len);
-        pos += len;
-        // Decode as binary (base64) or UTF-8 depending on context
-        return { ns: -1, tag: '#opaque', children: [], text: '', data };
+        pos++;
+        const data = readOpaque();
+        node.data  = node.data ? concat(node.data, data) : data;
+        node.text += _decoder.decode(data);
+        continue;
       }
 
-      const hasAttrs    = !!(token & HAS_ATTRS);
-      const hasChildren = !!(token & HAS_CHILDREN);
-      const tagToken    = token & TAG_MASK;
+      if (token === T_ENTITY) { pos++; node.text += entityChar(readMbUint()); continue; }
+      if (token === T_STR_T)  { pos++; readMbUint(); continue; }  // string table unused by EAS
+      if (token === T_LITERAL){ pos++; readMbUint(); continue; }
+      if (token === T_PI)     { pos++; skipAttributes(); continue; }
 
-      const tagName = lookupTag(currentPage, tagToken);
-      const node = {
-        ns: currentPage,
-        tag: tagName || `_${tagToken.toString(16)}`,
-        children: [],
-        text: '',
-      };
-
-      if (hasAttrs) {
-        // Skip attributes until END token (EAS never uses attrs, but be safe)
-        while (readByte() !== T_END) {/* skip */}
-      }
-
-      if (hasChildren) {
-        const savedPage = currentPage;
-        let child;
-        while (pos < bytes.length) {
-          const peek = bytes[pos];
-          if (peek === T_END) { pos++; break; }
-
-          if (peek === T_STR_I) {
-            pos++;
-            node.text += readCStr();
-          } else if (peek === T_SWITCH_PAGE) {
-            pos++;
-            currentPage = readByte();
-          } else if (peek === T_ENTITY) {
-            pos++;
-            readMbUint();
-          } else if (peek === T_OPAQUE) {
-            pos++;
-            const len = readMbUint();
-            node.text = bytes.slice(pos, pos + len);
-            pos += len;
-          } else {
-            child = readNode();
-            if (child) node.children.push(child);
-          }
-        }
-        currentPage = savedPage;
-      }
-
-      return node;
+      const child = readElement(depth + 1);
+      if (child) node.children.push(child);
     }
-    return null;
   }
 
-  return readNode();
+  function skipAttributes() {
+    while (pos < bytes.length && bytes[pos] !== T_END) {
+      const t = bytes[pos++];
+      if (t === T_STR_I)  readCStr();
+      else if (t === T_OPAQUE) readOpaque();
+      else if (t === T_STR_T || t === T_ENTITY) readMbUint();
+    }
+    pos++; // consume END
+  }
+
+  function readElement(depth) {
+    const token = readByte();
+
+    // Global tokens are handled by readContent; reaching one here means the
+    // stream is malformed. Skip the byte rather than throwing away the whole
+    // response — partial data is more useful than none.
+    if (token === T_END || token === T_SWITCH_PAGE) return null;
+
+    const hasAttrs   = !!(token & HAS_ATTRS);
+    const hasContent = !!(token & HAS_CONTENT);
+    const tagToken   = token & TAG_MASK;
+    const tagName    = lookupTag(currentPage, tagToken);
+
+    const node = {
+      ns:       currentPage,
+      tag:      tagName || `_0x${tagToken.toString(16)}`,
+      children: [],
+      text:     '',
+      data:     null,
+    };
+
+    if (hasAttrs) skipAttributes();
+
+    if (hasContent) {
+      const savedPage = currentPage;
+      readContent(node, depth);
+      currentPage = savedPage;   // a page switch inside a child does not leak out
+    }
+
+    return node;
+  }
+
+  // Skip any leading page switch, then read the single root element.
+  while (pos < bytes.length && bytes[pos] === T_SWITCH_PAGE) {
+    pos++;
+    currentPage = readByte();
+  }
+  if (pos >= bytes.length) return null;
+
+  return readElement(0);
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Encode JS object tree → WBXML bytes
-// ─────────────────────────────────────────────────────────────────
+function concat(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
+
+function entityChar(code) {
+  try { return String.fromCodePoint(code); } catch { return ''; }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Encode
+// ─────────────────────────────────────────────────────────────────────
 
 /**
- * @param {object} node - { ns: pageIndex|pageName, tag: string, children?, text? }
+ * Encode a node tree to WBXML.
+ *
+ * A node with `opaque` (Uint8Array) is written as an OPAQUE block;
+ * a node with `text` is written as STR_I. Element order is preserved
+ * verbatim — EAS schemas are sequence-ordered, so builders must emit
+ * children in schema order.
  */
 export function encode(node) {
   const out = [];
-  out.push(WBXML_VERSION, PUBLIC_ID, CHARSET_UTF8, 0x00); // header (no strtbl)
+  out.push(WBXML_VERSION, PUBLIC_ID, CHARSET_UTF8, 0x00);
 
   let currentPage = 0;
 
   function writeMbUint(value) {
-    if (value === 0) { out.push(0); return; }
-    const bytes = [];
-    while (value > 0) { bytes.unshift(value & 0x7F); value >>>= 7; }
-    for (let i = 0; i < bytes.length - 1; i++) out.push(bytes[i] | 0x80);
-    out.push(bytes[bytes.length - 1]);
+    const parts = [];
+    do { parts.unshift(value & 0x7F); value = Math.floor(value / 128); } while (value > 0);
+    for (let i = 0; i < parts.length - 1; i++) out.push(parts[i] | 0x80);
+    out.push(parts[parts.length - 1]);
   }
 
   function writeStr(str) {
     out.push(T_STR_I);
-    const encoded = unescape(encodeURIComponent(str)); // UTF-8 encode
-    for (let i = 0; i < encoded.length; i++) out.push(encoded.charCodeAt(i));
-    out.push(0); // null terminator
+    const encoded = _encoder.encode(str);
+    for (let i = 0; i < encoded.length; i++) {
+      // A NUL byte would terminate the inline string early; drop it.
+      if (encoded[i] !== 0) out.push(encoded[i]);
+    }
+    out.push(0);
   }
 
-  function writeNode(node) {
-    const pageIndex = typeof node.ns === 'string' ? (PAGE_BY_NAME[node.ns] ?? 0) : (node.ns ?? 0);
-    const tagInfo = encodeTag(pageIndex, node.tag);
-    if (!tagInfo) throw new Error(`Unknown EAS tag: page=${pageIndex} tag=${node.tag}`);
+  function writeOpaque(data) {
+    out.push(T_OPAQUE);
+    writeMbUint(data.length);
+    for (let i = 0; i < data.length; i++) out.push(data[i]);
+  }
+
+  function writeNode(n) {
+    const page    = pageIndex(n.ns ?? 0);
+    const tagInfo = encodeTag(page, n.tag);
+    if (!tagInfo) throw new Error(`Unknown EAS tag: ${n.ns}:${n.tag}`);
 
     if (tagInfo.page !== currentPage) {
       out.push(T_SWITCH_PAGE, tagInfo.page);
       currentPage = tagInfo.page;
     }
 
-    const hasChildren = (node.children && node.children.length > 0) ||
-                        (node.text !== undefined && node.text !== null && String(node.text) !== '');
-    const tokenByte = tagInfo.token | (hasChildren ? HAS_CHILDREN : 0);
-    out.push(tokenByte);
+    const children  = n.children || [];
+    const hasText   = n.text !== undefined && n.text !== null && String(n.text) !== '';
+    const hasOpaque = n.opaque instanceof Uint8Array && n.opaque.length > 0;
+    const hasContent = children.length > 0 || hasText || hasOpaque;
 
-    if (hasChildren) {
-      if (node.children) {
-        for (const child of node.children) writeNode(child);
-      }
-      if (node.text !== undefined && node.text !== null && String(node.text) !== '') {
-        writeStr(String(node.text));
-      }
-      out.push(T_END);
-    }
+    out.push(tagInfo.token | (hasContent ? HAS_CONTENT : 0));
+
+    if (!hasContent) return;   // self-closing: no END token
+
+    for (const child of children) writeNode(child);
+    if (hasOpaque)   writeOpaque(n.opaque);
+    else if (hasText) writeStr(String(n.text));
+    out.push(T_END);
   }
 
   writeNode(node);
   return new Uint8Array(out);
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Builder helpers
-// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Builders
+// ─────────────────────────────────────────────────────────────────────
 
-/**
- * Create an element node.
- * el('AirSync', 'Sync', el('AirSync', 'Collections', ...))
- */
+/** Element node. Falsy children are dropped so callers can inline conditionals. */
 export function el(ns, tag, ...children) {
   return { ns, tag, children: children.flat().filter(Boolean), text: '' };
 }
 
-/** Create a text-bearing element. */
+/** Text-bearing element. */
 export function tel(ns, tag, text) {
   return { ns, tag, children: [], text: String(text) };
 }
 
-/** Walk a decoded tree and find first matching node */
+/** Element carrying binary content, written as an OPAQUE block. */
+export function bel(ns, tag, bytes) {
+  return { ns, tag, children: [], text: '', opaque: bytes };
+}
+
+/** Empty element (written self-closing, no END token). */
+export function eel(ns, tag) {
+  return { ns, tag, children: [], text: '' };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Tree navigation
+// ─────────────────────────────────────────────────────────────────────
+//
+// Path steps are either a bare tag name ('Status') or namespace-qualified
+// ('AirSyncBase:Body'). Qualifying matters: 'Status', 'Body' and 'Data' exist
+// on several code pages, and an unqualified lookup happily returns the wrong
+// one. The previous implementation parsed the namespace hint and then ignored
+// it.
+
+function matches(node, step) {
+  const sep = step.indexOf(':');
+  if (sep < 0) return node.tag === step;
+  const ns  = step.slice(0, sep);
+  const tag = step.slice(sep + 1);
+  return node.tag === tag && node.ns === pageIndex(ns);
+}
+
+/** First descendant reached by following `path` one level at a time. */
 export function find(node, ...path) {
-  if (!node) return null;
   let cur = node;
   for (const step of path) {
     if (!cur || !cur.children) return null;
-    // step can be 'tag' or 'page:tag'
-    const [nsHint, tagHint] = step.includes(':') ? step.split(':') : [null, step];
-    cur = cur.children.find(c => {
-      if (tagHint && c.tag !== tagHint) return false;
-      return true;
-    }) || null;
+    cur = cur.children.find(c => matches(c, step)) || null;
   }
   return cur;
 }
 
-/** Get text content of first matching node */
+/** Text content of the node at `path`, or null. */
 export function getText(node, ...path) {
   const found = find(node, ...path);
   return found ? found.text : null;
 }
 
-/** Get all children with a given tag */
-export function findAll(node, tag) {
+/** All direct children matching `step`. */
+export function findAll(node, step) {
   if (!node || !node.children) return [];
-  return node.children.filter(c => c.tag === tag);
+  return node.children.filter(c => matches(c, step));
+}
+
+/** Compact debug rendering of a decoded tree. */
+export function dump(node, indent = '') {
+  if (!node) return '(empty)';
+  const text = node.text ? ` = ${JSON.stringify(node.text.slice(0, 120))}` : '';
+  let out = `${indent}${node.tag}${text}\n`;
+  for (const child of node.children || []) out += dump(child, `${indent}  `);
+  return out;
 }

@@ -1,322 +1,381 @@
 /**
  * EAS command builders and response parsers.
  *
- * Implemented commands:
- *   FolderSync   – sync folder hierarchy
- *   Sync         – sync email items (fetch changes, read flag, delete)
- *   MoveItems    – move message to another folder
- *   ItemFetch    – fetch single item (full MIME)
+ * Builders return WBXML node trees (encoded by the client); parsers take the
+ * decoded tree the client hands back.
+ *
+ * Element order is not cosmetic. The EAS schemas are ordered sequences, so
+ * every builder emits children in schema order. Namespace-qualified lookups
+ * ('AirSyncBase:Body') are used throughout, because Status, Body and Data
+ * exist on several code pages and an unqualified match silently picks the
+ * wrong one.
  */
 
-import { el, tel, encode, decode, findAll, find, getText } from './wbxml.js';
-import { BODY_TYPE, FOLDER_TYPE_NAME } from './protocol.js';
+import { el, tel, find, findAll, getText } from './wbxml.js';
+import {
+  BODY_TYPE, MIME_SUPPORT, FOLDER_TYPE_NAME, STATUS, versionValue,
+} from './protocol.js';
 
-// ─────────────────────────────────────────────────────────────────
+/** Sync/Options/FilterType — how far back the server should look. */
+export const FILTER_TYPE = {
+  ALL:        0,
+  ONE_DAY:    1,
+  THREE_DAYS: 2,
+  ONE_WEEK:   3,
+  TWO_WEEKS:  4,
+  ONE_MONTH:  5,
+};
+
+/** Default per-item MIME budget; larger items are re-fetched individually. */
+export const DEFAULT_TRUNCATION_SIZE = 262144; // 256 KiB
+
+// ─────────────────────────────────────────────────────────────────────
 // FolderSync
-// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 
-/**
- * Build FolderSync WBXML request.
- * @param {string} syncKey  '0' = initial sync
- */
 export function buildFolderSync(syncKey) {
-  return encode(
-    el('FolderHierarchy', 'FolderSync',
-      tel('FolderHierarchy', 'SyncKey', syncKey)
-    )
-  );
+  return el('FolderHierarchy', 'FolderSync',
+    tel('FolderHierarchy', 'SyncKey', String(syncKey)));
 }
 
 /**
- * Parse FolderSync response.
- * Returns { syncKey, status, added: [], deleted: [], updated: [] }
+ * @returns {{syncKey, status, added: [], deleted: [], updated: []}}
  */
-export function parseFolderSync(buf) {
-  const doc = decode(buf);
-  const root = doc.tag === 'FolderSync' ? doc : find(doc, 'FolderSync');
-  if (!root) throw new Error('FolderSync: missing root element');
+export function parseFolderSync(doc) {
+  const root = doc?.tag === 'FolderSync' ? doc : find(doc, 'FolderHierarchy:FolderSync');
+  if (!root) throw new Error('FolderSync: no FolderSync element in response');
 
-  const status   = getText(root, 'Status') || '0';
-  const syncKey  = getText(root, 'SyncKey') || '0';
-  const changes  = find(root, 'Changes');
+  const result = {
+    status:  getText(root, 'FolderHierarchy:Status') || '0',
+    syncKey: getText(root, 'FolderHierarchy:SyncKey') || '0',
+    added: [], deleted: [], updated: [],
+  };
 
-  const result = { syncKey, status, added: [], deleted: [], updated: [] };
+  const changes = find(root, 'FolderHierarchy:Changes');
+  if (!changes) return result;
 
-  if (changes) {
-    for (const child of changes.children) {
-      const folder = {
-        serverId:    getText(child, 'ServerId'),
-        parentId:    getText(child, 'ParentId'),
-        displayName: getText(child, 'DisplayName'),
-        type:        parseInt(getText(child, 'Type') || '1', 10),
-        typeName:    FOLDER_TYPE_NAME[parseInt(getText(child, 'Type') || '1', 10)] || null,
-      };
-      if (child.tag === 'Add')    result.added.push(folder);
-      if (child.tag === 'Delete') result.deleted.push({ serverId: getText(child, 'ServerId') });
-      if (child.tag === 'Update') result.updated.push(folder);
+  for (const child of changes.children) {
+    // <Count> also lives here; only Add/Delete/Update describe folders.
+    if (child.tag === 'Delete') {
+      result.deleted.push({ serverId: getText(child, 'FolderHierarchy:ServerId') });
+      continue;
     }
+    if (child.tag !== 'Add' && child.tag !== 'Update') continue;
+
+    const type = parseInt(getText(child, 'FolderHierarchy:Type') || '1', 10);
+    const folder = {
+      serverId:    getText(child, 'FolderHierarchy:ServerId'),
+      parentId:    getText(child, 'FolderHierarchy:ParentId'),
+      displayName: getText(child, 'FolderHierarchy:DisplayName'),
+      type,
+      typeName:    FOLDER_TYPE_NAME[type] || null,
+    };
+    (child.tag === 'Add' ? result.added : result.updated).push(folder);
   }
 
   return result;
 }
 
-// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 // Sync
-// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
 
 /**
- * Build Sync request for a single folder.
+ * Build a Sync request for one collection.
  *
- * @param {string} syncKey
- * @param {string} collectionId   EAS ServerId of folder
- * @param {object} [opts]
- * @param {number} [opts.windowSize=50]  max items per response
- * @param {boolean} [opts.getChanges]    false = push changes only
- * @param {string[]} [opts.fetchIds]     explicit item IDs to fetch
- * @param {string[]} [opts.deleteIds]    items to delete on server
- * @param {object[]} [opts.readChanges]  [{serverId, read}] flag updates
+ * @param {object} spec
+ * @param {string} spec.syncKey
+ * @param {string} spec.collectionId
+ * @param {string} [spec.easVersion='14.1']
+ * @param {number} [spec.windowSize=100]
+ * @param {boolean} [spec.getChanges]      omit on the priming request
+ * @param {number} [spec.filterType]
+ * @param {number} [spec.truncationSize]
+ * @param {string[]} [spec.fetchIds]
+ * @param {string[]} [spec.deleteIds]
+ * @param {Array<{serverId: string, read: boolean}>} [spec.readChanges]
+ * @param {boolean} [spec.deletesAsMoves=true]  deleted items go to Deleted Items
  */
-export function buildSync(syncKey, collectionId, opts = {}) {
+export function buildSync(spec) {
   const {
-    windowSize  = 50,
-    getChanges  = true,
-    fetchIds    = [],
-    deleteIds   = [],
-    readChanges = [],
-  } = opts;
+    syncKey,
+    collectionId,
+    easVersion     = '14.1',
+    windowSize     = 100,
+    getChanges,
+    filterType     = FILTER_TYPE.ALL,
+    truncationSize = DEFAULT_TRUNCATION_SIZE,
+    fetchIds       = [],
+    deleteIds      = [],
+    readChanges    = [],
+    deletesAsMoves = true,
+  } = spec;
 
-  // Note: CollectionId lives in the GetItemEstimate code page (6) in WBXML,
-  // even when used inside a Sync Collection element.
-  // WindowSize goes directly on Collection, not inside Options.
-  // ApplicationData is not a real WBXML element; properties go directly in Change.
+  const isPriming = String(syncKey) === '0';
+  const legacy    = versionValue(easVersion) < 140;
+
+  // The priming request (SyncKey=0) is answered with a fresh key and no items
+  // regardless of what else it carries, so it is sent bare. Options on a
+  // priming request are the classic reason a first sync appears to "work" but
+  // return nothing.
+  if (isPriming) {
+    return el('AirSync', 'Sync',
+      el('AirSync', 'Collections',
+        el('AirSync', 'Collection',
+          // Class is a 2.5/12.x element; from 14.0 the server derives it from
+          // the collection and sending it can be answered with status 4.
+          legacy ? tel('AirSync', 'Class', 'Email') : null,
+          tel('AirSync', 'SyncKey', '0'),
+          tel('AirSync', 'CollectionId', collectionId),
+        )));
+  }
+
+  const commands = [
+    ...fetchIds.map(id => el('AirSync', 'Fetch', tel('AirSync', 'ServerId', id))),
+    ...deleteIds.map(id => el('AirSync', 'Delete', tel('AirSync', 'ServerId', id))),
+    ...readChanges.map(({ serverId, read }) => el('AirSync', 'Change',
+      tel('AirSync', 'ServerId', serverId),
+      el('AirSync', 'ApplicationData',
+        tel('Email', 'Read', read ? '1' : '0')))),
+  ];
 
   const options = el('AirSync', 'Options',
+    filterType ? tel('AirSync', 'FilterType', String(filterType)) : null,
+    // Without MIMESupport the server will not honour BodyPreference Type=4 and
+    // answers with a plain-text body instead of the raw message.
+    tel('AirSync', 'MIMESupport', String(MIME_SUPPORT.ALWAYS)),
     el('AirSyncBase', 'BodyPreference',
       tel('AirSyncBase', 'Type', String(BODY_TYPE.MIME)),
-      tel('AirSyncBase', 'TruncationSize', '20971520'), // 20 MB; items beyond this need ItemOperations/Fetch
+      tel('AirSyncBase', 'TruncationSize', String(truncationSize)),
     ),
   );
 
-  const commands = [];
-
-  for (const id of fetchIds) {
-    commands.push(el('AirSync', 'Fetch', tel('AirSync', 'ServerId', id)));
-  }
-
-  for (const id of deleteIds) {
-    commands.push(el('AirSync', 'Delete', tel('AirSync', 'ServerId', id)));
-  }
-
-  for (const { serverId, read } of readChanges) {
-    // Properties placed directly inside Change (no ApplicationData wrapper in WBXML)
-    commands.push(
-      el('AirSync', 'Change',
-        tel('AirSync', 'ServerId', serverId),
-        tel('Email', 'Read', read ? '1' : '0'),
-      )
-    );
-  }
-
-  const collectionEl = el('AirSync', 'Collection',
-    tel('AirSync', 'Class', 'Email'),
-    tel('AirSync', 'SyncKey', syncKey),
-    tel('GetItemEstimate', 'CollectionId', collectionId), // SWITCH_PAGE to page 6
-    tel('AirSync', 'WindowSize', String(windowSize)),
-    options,
-    commands.length > 0 ? el('AirSync', 'Commands', ...commands) : null,
-  );
-
-  return encode(
-    el('AirSync', 'Sync',
-      el('AirSync', 'Collections', collectionEl)
-    )
-  );
+  return el('AirSync', 'Sync',
+    el('AirSync', 'Collections',
+      el('AirSync', 'Collection',
+        legacy ? tel('AirSync', 'Class', 'Email') : null,
+        tel('AirSync', 'SyncKey', String(syncKey)),
+        tel('AirSync', 'CollectionId', collectionId),
+        tel('AirSync', 'DeletesAsMoves', deletesAsMoves ? '1' : '0'),
+        getChanges === undefined ? null : tel('AirSync', 'GetChanges', getChanges ? '1' : '0'),
+        tel('AirSync', 'WindowSize', String(windowSize)),
+        options,
+        commands.length ? el('AirSync', 'Commands', ...commands) : null,
+      )));
 }
 
 /**
- * Parse Sync response.
- * Returns { syncKey, status, collectionId, moreAvailable, added[], changed[], deleted[] }
+ * Parse a Sync response.
  *
- * Each added/changed item: { serverId, mime }
- * deleted item: { serverId }
+ * Returns null for an empty body (a legitimate "nothing changed" answer).
+ * Otherwise `{ status, collections: [...] }` — the response may carry several
+ * collections even when the request asked for one.
  */
-export function parseSync(buf) {
-  const doc = decode(buf);
-
-  // Empty 200 with no body means no changes
+export function parseSync(doc) {
   if (!doc) return null;
 
-  const root = doc.tag === 'Sync' ? doc : find(doc, 'Sync');
+  const root = doc.tag === 'Sync' ? doc : find(doc, 'AirSync:Sync');
   if (!root) return null;
 
-  const collection = find(root, 'Collections', 'Collection');
-  if (!collection) return null;
+  const result = {
+    status:      getText(root, 'AirSync:Status'),
+    collections: [],
+  };
 
-  const syncKey      = getText(collection, 'SyncKey') || '0';
-  const status       = getText(collection, 'Status') || '1';
-  const collectionId = getText(collection, 'CollectionId') || '';
-  const moreAvail    = !!find(collection, 'MoreAvailable');
-
-  const result = { syncKey, status, collectionId, moreAvailable: moreAvail,
-                   added: [], changed: [], deleted: [] };
-
-  const commands = find(collection, 'Commands');
-  if (!commands) return result;
-
-  for (const cmd of commands.children) {
-    const serverId = getText(cmd, 'ServerId');
-    if (!serverId) continue;
-
-    if (cmd.tag === 'Add' || cmd.tag === 'Change') {
-      const appData = find(cmd, 'ApplicationData');
-      const mimeNode = appData ? find(appData, 'Body') : null;
-      // The body Data node contains raw MIME (requested as Type=4)
-      const dataNode  = mimeNode ? find(mimeNode, 'Data')      : null;
-      const truncNode = mimeNode ? find(mimeNode, 'Truncated') : null;
-      const mime = dataNode ? dataNode.text : null;
-      const mimeStr = mime instanceof Uint8Array
-        ? new TextDecoder().decode(mime)
-        : (mime || '');
-
-      const readNode = appData ? find(appData, 'Read') : null;
-      const read      = readNode ? readNode.text !== '0' : false;
-      const truncated = truncNode?.text === '1';
-
-      const entry = { serverId, mime: mimeStr, read, truncated };
-      if (cmd.tag === 'Add')    result.added.push(entry);
-      else                      result.changed.push(entry);
-    }
-
-    if (cmd.tag === 'Delete') {
-      result.deleted.push({ serverId });
-    }
+  const collectionsNode = find(root, 'AirSync:Collections');
+  for (const collection of findAll(collectionsNode, 'AirSync:Collection')) {
+    result.collections.push(parseSyncCollection(collection));
   }
 
-  // Also handle Responses block for our sent commands
   return result;
 }
 
-// ─────────────────────────────────────────────────────────────────
-// MoveItems
-// ─────────────────────────────────────────────────────────────────
+function parseSyncCollection(collection) {
+  const out = {
+    collectionId:  getText(collection, 'AirSync:CollectionId') || '',
+    syncKey:       getText(collection, 'AirSync:SyncKey') || '0',
+    status:        getText(collection, 'AirSync:Status') || STATUS.SUCCESS,
+    moreAvailable: !!find(collection, 'AirSync:MoreAvailable'),
+    added: [], changed: [], deleted: [], responses: [],
+  };
 
-export function buildMoveItems(srcMsgId, srcFldId, dstFldId) {
-  return encode(
-    el('Move', 'MoveItems',
-      el('Move', 'Move',
-        tel('Move', 'SrcMsgId', srcMsgId),
-        tel('Move', 'SrcFldId', srcFldId),
-        tel('Move', 'DstFldId', dstFldId),
-      )
-    )
-  );
+  const commands = find(collection, 'AirSync:Commands');
+  for (const cmd of commands?.children || []) {
+    const serverId = getText(cmd, 'AirSync:ServerId');
+    if (!serverId) continue;
+
+    switch (cmd.tag) {
+      case 'Add':
+      case 'Change':
+        (cmd.tag === 'Add' ? out.added : out.changed).push(parseItem(cmd, serverId));
+        break;
+      case 'Delete':
+      case 'SoftDelete':
+        out.deleted.push({ serverId, soft: cmd.tag === 'SoftDelete' });
+        break;
+    }
+  }
+
+  // Acknowledgements for the commands we sent. Worth surfacing: a Change that
+  // failed here is a read flag that silently did not propagate.
+  const responses = find(collection, 'AirSync:Responses');
+  for (const resp of responses?.children || []) {
+    out.responses.push({
+      type:     resp.tag,
+      serverId: getText(resp, 'AirSync:ServerId'),
+      clientId: getText(resp, 'AirSync:ClientId'),
+      status:   getText(resp, 'AirSync:Status'),
+      item:     resp.tag === 'Fetch' ? parseItem(resp, getText(resp, 'AirSync:ServerId')) : null,
+    });
+  }
+
+  return out;
 }
 
-export function parseMoveItems(buf) {
-  const doc = decode(buf);
-  const responses = find(doc, 'Response') ? [find(doc, 'Response')] : findAll(doc, 'Response');
-  return responses.map(r => ({
-    srcMsgId: getText(r, 'SrcMsgId'),
-    status:   getText(r, 'Status'),
-    dstMsgId: getText(r, 'DstMsgId'),
+/** Extract the fields we care about from an Add/Change/Fetch element. */
+function parseItem(node, serverId) {
+  const appData = find(node, 'AirSync:ApplicationData');
+  if (!appData) return { serverId, mime: '', read: false, truncated: false };
+
+  // 14.x: AirSyncBase/Body/Data holds the MIME when BodyPreference Type=4.
+  // 2.5:  Email/MIMEData holds it instead.
+  const body      = find(appData, 'AirSyncBase:Body');
+  const dataNode  = body ? find(body, 'AirSyncBase:Data') : null;
+  const legacyMime = getText(appData, 'Email:MIMEData');
+
+  const mime = dataNode?.text ?? legacyMime ?? '';
+
+  const truncated =
+    (body ? getText(body, 'AirSyncBase:Truncated') : null) === '1' ||
+    getText(appData, 'Email:MIMETruncated') === '1';
+
+  const readText = getText(appData, 'Email:Read');
+
+  return {
+    serverId,
+    mime,
+    read:         readText === '1',
+    hasReadFlag:  readText !== null,
+    truncated,
+    subject:      getText(appData, 'Email:Subject'),
+    dateReceived: getText(appData, 'Email:DateReceived'),
+    messageClass: getText(appData, 'Email:MessageClass'),
+    estimatedSize: body ? getText(body, 'AirSyncBase:EstimatedDataSize') : null,
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// MoveItems
+// ─────────────────────────────────────────────────────────────────────
+
+export function buildMoveItems(moves) {
+  return el('Move', 'MoveItems',
+    ...moves.map(({ srcMsgId, srcFldId, dstFldId }) => el('Move', 'Move',
+      tel('Move', 'SrcMsgId', srcMsgId),
+      tel('Move', 'SrcFldId', srcFldId),
+      tel('Move', 'DstFldId', dstFldId),
+    )));
+}
+
+export function parseMoveItems(doc) {
+  const root = doc?.tag === 'MoveItems' ? doc : find(doc, 'Move:MoveItems');
+  if (!root) return [];
+  return findAll(root, 'Move:Response').map(r => ({
+    srcMsgId: getText(r, 'Move:SrcMsgId'),
+    status:   getText(r, 'Move:Status'),
+    dstMsgId: getText(r, 'Move:DstMsgId'),
   }));
 }
 
-// ─────────────────────────────────────────────────────────────────
-// SendMail (via raw MIME – EAS 14+)
-// ─────────────────────────────────────────────────────────────────
-
-// No WBXML needed for raw MIME send – handled by client.sendRawMime()
-
-// ─────────────────────────────────────────────────────────────────
-// ItemOperations/Fetch – retrieve full MIME for a single item
-// Used when Sync returns Truncated=1 (item exceeded TruncationSize)
-// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// ItemOperations / Fetch
+// ─────────────────────────────────────────────────────────────────────
 
 /**
- * Build an ItemOperations Fetch request for a single email item.
- * No TruncationSize in BodyPreference = server sends the complete MIME.
+ * Fetch one item in full.
+ *
+ * BodyPreference deliberately carries no TruncationSize, which is what makes
+ * the server return the complete MIME.
  */
 export function buildItemOperationsFetch(collectionId, serverId) {
-  return encode(
-    el('ItemOperations', 'ItemOperations',
-      el('ItemOperations', 'Fetch',
-        tel('ItemOperations', 'Store', 'Mailbox'),
-        tel('AirSync',         'ServerId',     serverId),
-        tel('GetItemEstimate', 'CollectionId', collectionId),
-        el('ItemOperations', 'Options',
-          el('AirSyncBase', 'BodyPreference',
-            tel('AirSyncBase', 'Type', String(BODY_TYPE.MIME)),
-            // No TruncationSize → server must return full content
-          ),
+  return el('ItemOperations', 'ItemOperations',
+    el('ItemOperations', 'Fetch',
+      tel('ItemOperations', 'Store', 'Mailbox'),
+      tel('AirSync', 'CollectionId', collectionId),
+      tel('AirSync', 'ServerId', serverId),
+      el('ItemOperations', 'Options',
+        tel('AirSync', 'MIMESupport', String(MIME_SUPPORT.ALWAYS)),
+        el('AirSyncBase', 'BodyPreference',
+          tel('AirSyncBase', 'Type', String(BODY_TYPE.MIME)),
         ),
-      )
-    )
-  );
+      ),
+    ));
 }
 
-/**
- * Parse an ItemOperations Fetch response.
- * Returns { mime: string } or throws on error status.
- */
-export function parseItemOperationsFetch(buf) {
-  const doc  = decode(buf);
-  const root = doc.tag === 'ItemOperations' ? doc : find(doc, 'ItemOperations');
-  if (!root) throw new Error('ItemOperations/Fetch: missing root element');
+export function parseItemOperationsFetch(doc) {
+  const root = doc?.tag === 'ItemOperations' ? doc : find(doc, 'ItemOperations:ItemOperations');
+  if (!root) throw new Error('ItemOperations: no ItemOperations element in response');
 
-  const rootStatus = getText(root, 'Status');
-  if (rootStatus && rootStatus !== '1') {
-    throw new Error(`ItemOperations/Fetch failed: status=${rootStatus}`);
+  const status = getText(root, 'ItemOperations:Status');
+  if (status && status !== STATUS.SUCCESS) {
+    throw new Error(`ItemOperations failed with status ${status}`);
   }
 
-  const fetchNode = find(root, 'Response', 'Fetch');
-  if (!fetchNode) throw new Error('ItemOperations/Fetch: missing Response/Fetch element');
+  const fetchNode = find(root, 'ItemOperations:Response', 'ItemOperations:Fetch');
+  if (!fetchNode) throw new Error('ItemOperations: no Response/Fetch element');
 
-  const fetchStatus = getText(fetchNode, 'Status');
-  if (fetchStatus && fetchStatus !== '1') {
-    throw new Error(`ItemOperations/Fetch item error: status=${fetchStatus}`);
+  const fetchStatus = getText(fetchNode, 'ItemOperations:Status');
+  if (fetchStatus && fetchStatus !== STATUS.SUCCESS) {
+    throw new Error(`ItemOperations/Fetch item error: status ${fetchStatus}`);
   }
 
-  const props    = find(fetchNode, 'Properties');
-  const dataNode = props ? find(props, 'Body', 'Data') : null;
-  const mime     = dataNode?.text;
-  const mimeStr  = mime instanceof Uint8Array
-    ? new TextDecoder().decode(mime)
-    : (mime || '');
+  const props = find(fetchNode, 'ItemOperations:Properties');
+  const body  = props ? find(props, 'AirSyncBase:Body') : null;
+  const data  = body ? find(body, 'AirSyncBase:Data') : null;
 
-  return { mime: mimeStr };
+  return { mime: data?.text ?? getText(props, 'Email:MIMEData') ?? '' };
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Settings – DeviceInformation (register client with server)
-// ─────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────
+// Settings / DeviceInformation
+// ─────────────────────────────────────────────────────────────────────
 
 /**
- * @param {object} profile   Device profile from DEVICE_PROFILES
+ * Register device metadata so the mailbox owner and the Exchange admin can
+ * tell in OWA which device a partnership belongs to.
+ *
+ * Element order follows the MS-ASCMD schema exactly (Model, IMEI,
+ * FriendlyName, OS, OSLanguage, PhoneNumber, UserAgent); optional fields are
+ * omitted rather than sent empty.
+ *
+ * @param {object} profile
  * @param {object} [opts]
- * @param {string} [opts.email]  Account email — appended to FriendlyName so the
- *                               Exchange admin can identify which user to approve
+ * @param {string} [opts.email]  appended to FriendlyName for identification
  */
-export function buildSettings(profile = {}, opts = {}) {
-  const model        = profile.model        || 'Thunderbird';
-  const os           = profile.os           || '';
-  const osLanguage   = profile.osLanguage   || '';
-  const userAgent    = profile.userAgent    || 'Thunderbird-EAS/1.0';
-  // Include email in FriendlyName so OWA shows e.g. "Thunderbird EAS (user@domain)"
+export function buildDeviceInformation(profile = {}, opts = {}) {
   const baseName     = profile.friendlyName || 'Thunderbird EAS';
   const friendlyName = opts.email ? `${baseName} (${opts.email})` : baseName;
 
-  return encode(
-    el('Settings', 'Settings',
-      el('Settings', 'DeviceInformation',
-        el('Settings', 'Set',
-          tel('Settings', 'Model',        model),
-          tel('Settings', 'FriendlyName', friendlyName),
-          ...(os         ? [tel('Settings', 'OS',         os)]         : []),
-          ...(osLanguage ? [tel('Settings', 'OSLanguage', osLanguage)] : []),
-          tel('Settings', 'UserAgent',    userAgent),
-        )
-      )
-    )
-  );
+  return el('Settings', 'DeviceInformation',
+    el('Settings', 'Set',
+      tel('Settings', 'Model', profile.model || 'Thunderbird'),
+      tel('Settings', 'FriendlyName', friendlyName),
+      profile.os         ? tel('Settings', 'OS',         profile.os)         : null,
+      profile.osLanguage ? tel('Settings', 'OSLanguage', profile.osLanguage) : null,
+      tel('Settings', 'UserAgent', profile.userAgent || 'Thunderbird-EAS/1.0'),
+    ));
+}
+
+export function buildSettings(profile = {}, opts = {}) {
+  return el('Settings', 'Settings', buildDeviceInformation(profile, opts));
+}
+
+export function parseSettings(doc) {
+  const root = doc?.tag === 'Settings' ? doc : find(doc, 'Settings:Settings');
+  if (!root) return { status: null, deviceInformationStatus: null };
+  return {
+    status: getText(root, 'Settings:Status'),
+    deviceInformationStatus:
+      getText(find(root, 'Settings:DeviceInformation'), 'Settings:Status'),
+  };
 }

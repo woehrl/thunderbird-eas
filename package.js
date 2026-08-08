@@ -107,16 +107,41 @@ function walk(dir, base = '') {
 //                                   in Thunderbird about:config)
 
 const privileged = process.argv.includes('--privileged');
+const skipTests  = process.argv.includes('--skip-selftest');
 
+// The protocol self-test guards the WBXML code page tables. A shifted table
+// produces requests that servers reject with a generic error and is otherwise
+// invisible, so it gates packaging by default.
+if (!skipTests) {
+  const { status } = require('child_process').spawnSync(
+    process.execPath, [path.join(__dirname, 'tools', 'selftest.mjs')],
+    { stdio: 'inherit' }
+  );
+  if (status !== 0) {
+    console.error('\nSelf-test failed — refusing to package. Use --skip-selftest to override.');
+    process.exit(1);
+  }
+  console.log('');
+}
+
+// NOTE: no "events": ["startup"] here.
+//
+// Declaring it makes Thunderbird call api.onStartup() on the API class during
+// bootstrap. A class that does not implement it fails with
+// "api.onStartup is not a function", the bootstrap throws, and the whole
+// extension never starts — which shows up only as a greyed-out options button
+// in the Add-ons Manager. This API is used on demand and needs no early
+// startup hook. The implementation still defines a no-op onStartup() as a
+// second line of defence.
 const EXPERIMENT_API_BLOCK = `,
 
   "experiment_apis": {
     "easAccount": {
       "schema": "experiments/schema.json",
       "parent": {
-        "scopes":  ["addon_parent"],
-        "script":  "experiments/implementation.js",
-        "events":  ["startup"]
+        "scopes": ["addon_parent"],
+        "script": "experiments/implementation.js",
+        "paths":  [["easAccount"]]
       }
     }
   }`;
@@ -128,9 +153,14 @@ const version = manifest.version;
 const suffix  = privileged ? '-privileged' : '';
 const out     = path.join(distDir, `thunderbird-eas-${version}${suffix}-${Date.now()}.xpi`);
 const zip     = new ZipWriter();
-const skip    = new Set(['package.js', 'README.md', 'DEVELOPMENT.md', '.git', 'dist']);
+const skip    = new Set([
+  'package.js', 'README.md', 'DEVELOPMENT.md', 'ANLEITUNG.md', 'LICENSE',
+  '.git', 'dist', 'tools',
+]);
 
 if (!fs.existsSync(distDir)) fs.mkdirSync(distDir);
+
+let injected = false;
 
 for (const { full, rel } of walk(root)) {
   if (skip.has(rel.split('/')[0])) continue;
@@ -141,14 +171,25 @@ for (const { full, rel } of walk(root)) {
 
   // Inject experiment_apis into manifest.json for the privileged build
   if (privileged && rel === 'manifest.json') {
-    let text = data.toString('utf8');
-    // Insert before the closing brace
-    text = text.replace(/(\n\})\s*$/, `${EXPERIMENT_API_BLOCK}\n}`);
-    data = Buffer.from(text, 'utf8');
+    const text = data.toString('utf8');
+    const patched = text.replace(/(\n\})\s*$/, `${EXPERIMENT_API_BLOCK}\n}`);
+    if (patched === text) {
+      console.error('ERROR: could not inject experiment_apis — manifest.json does not end with "\\n}".');
+      process.exit(1);
+    }
+    // Fail loudly rather than shipping an .xpi that silently lacks the API.
+    JSON.parse(patched);
+    data = Buffer.from(patched, 'utf8');
+    injected = true;
   }
 
   zip.addFile(rel, data);
   console.log(' +', rel);
+}
+
+if (privileged && !injected) {
+  console.error('ERROR: privileged build requested but manifest.json was never processed.');
+  process.exit(1);
 }
 
 fs.writeFileSync(out, zip.build());

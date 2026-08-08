@@ -1,37 +1,97 @@
 [
   {
     "namespace": "easAccount",
-    "description": "Create and remove real Thunderbird account nodes for EAS accounts via XPCOM.",
+    "description": "Create real Thunderbird account nodes for EAS accounts, tag special folders, and store credentials in the password manager — all via XPCOM.",
     "functions": [
       {
         "name": "createAccount",
         "type": "function",
         "async": true,
-        "description": "Create a top-level Thunderbird account node for an EAS email address. Returns the account key string.",
+        "description": "Create (or re-use) a top-level Thunderbird account node with an identity for an EAS address. Idempotent.",
         "parameters": [
+          { "name": "email",    "type": "string", "description": "The EAS email address." },
+          { "name": "hostname", "type": "string", "description": "The EAS server hostname; keeps accounts unique." },
           {
-            "name": "email",
-            "type": "string",
-            "description": "The EAS email address (used as display name and username)."
-          },
-          {
-            "name": "hostname",
-            "type": "string",
-            "description": "The EAS server hostname (used as server hostname to keep accounts unique)."
+            "name": "options",
+            "type": "object",
+            "optional": true,
+            "properties": {
+              "displayName": { "type": "string", "optional": true, "description": "Name shown in the folder pane." },
+              "fullName":    { "type": "string", "optional": true, "description": "Display name used on outgoing mail." }
+            }
           }
+        ]
+      },
+      {
+        "name": "listAccounts",
+        "type": "function",
+        "async": true,
+        "description": "List every Thunderbird account node this add-on could have created, so orphans left behind by a failed setup can be removed.",
+        "parameters": []
+      },
+      {
+        "name": "setSpecialFolder",
+        "type": "function",
+        "async": true,
+        "description": "Tag a folder as Inbox/Sent/Drafts/Trash/Outbox/Junk/Archives and point the identity at it.",
+        "parameters": [
+          { "name": "accountKey", "type": "string" },
+          { "name": "folderPath", "type": "string", "description": "Folder path relative to the account root, e.g. '/Inbox'." },
+          {
+            "name": "role",
+            "type": "string",
+            "enum": ["inbox", "sent", "drafts", "trash", "outbox", "junk", "archives", "templates"]
+          }
+        ]
+      },
+      {
+        "name": "setAccountName",
+        "type": "function",
+        "async": true,
+        "description": "Rename the account node shown in the folder pane.",
+        "parameters": [
+          { "name": "accountKey", "type": "string" },
+          { "name": "name",       "type": "string" }
         ]
       },
       {
         "name": "removeAccount",
         "type": "function",
         "async": true,
-        "description": "Remove a Thunderbird account node previously created by EAS, including its local mail files.",
+        "description": "Remove an account node created by this add-on, including its local mail files.",
         "parameters": [
-          {
-            "name": "accountKey",
-            "type": "string",
-            "description": "The Thunderbird account key returned by createAccount."
-          }
+          { "name": "accountKey", "type": "string" }
+        ]
+      },
+      {
+        "name": "storePassword",
+        "type": "function",
+        "async": true,
+        "description": "Store the EAS password in Thunderbird's password manager.",
+        "parameters": [
+          { "name": "hostname", "type": "string" },
+          { "name": "username", "type": "string" },
+          { "name": "password", "type": "string" }
+        ]
+      },
+      {
+        "name": "getPassword",
+        "type": "function",
+        "async": true,
+        "description": "Read the EAS password back from the password manager. Returns null if absent.",
+        "parameters": [
+          { "name": "hostname", "type": "string" },
+          { "name": "username", "type": "string" }
+        ]
+      },
+      {
+        "name": "removePassword",
+        "type": "function",
+        "async": true,
+        "description": "Delete the stored EAS password.",
+        "parameters": [
+          { "name": "hostname", "type": "string" },
+          { "name": "username", "type": "string" }
         ]
       }
     ],

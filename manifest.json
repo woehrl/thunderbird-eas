@@ -1,14 +1,14 @@
 {
   "manifest_version": 2,
   "name": "Thunderbird EAS Connector",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Connect Thunderbird to Exchange ActiveSync (EAS) servers",
   "author": "woehrl",
 
   "browser_specific_settings": {
     "gecko": {
       "id": "thunderbird-eas@woehrl.biz",
-      "strict_min_version": "91.0"
+      "strict_min_version": "128.0"
     }
   },
 
@@ -16,10 +16,14 @@
     "accountsRead",
     "accountsFolders",
     "messagesRead",
+    "messagesUpdate",
+    "messagesModify",
     "messagesDelete",
     "messagesMove",
     "messagesImport",
     "compose",
+    "menus",
+    "notifications",
     "storage",
     "alarms",
     "https://*/*"

@@ -1,253 +1,279 @@
 /**
- * EAS WBXML Code Pages (MS-ASWBXML specification)
- * Arrays start at token 0x05; use null for undefined/reserved tokens.
+ * EAS protocol constants, status codes and device profiles.
+ *
+ * The WBXML code page tables live in ./codepages.js — they are re-exported
+ * here so existing imports keep working.
  */
 
-export const CODE_PAGES = [
-  // Page 0: AirSync
-  ['Sync','Responses','Add','Change','Delete','Fetch','SyncKey','ClientId',
-   'ServerId','Status','Collection','Class','Version','Collections','Options',
-   'Total','Commands','Get','Add','Delete','Fetch','SyncKey','ClientId',
-   'Change','MoreAvailable','WindowSize','PerformanceStats','Partial',
-   'ConversationMode','MaxItems','HeartbeatInterval'],
+export {
+  CODE_PAGES, PAGE_NAMES, PAGE_BY_NAME, FIRST_TOKEN,
+  lookupTag, encodeTag, pageIndex, verifyCodePages, TABLE_ANCHORS,
+} from './codepages.js';
 
-  // Page 1: Contacts
-  ['Anniversary','AssistantName','AssistantTelephoneNumber','Birthday',
-   'Body','BodySize','BodyTruncated','Business2TelephoneNumber',
-   'BusinessAddressCity','BusinessAddressCountry','BusinessAddressPostalCode',
-   'BusinessAddressState','BusinessAddressStreet','BusinessFaxNumber',
-   'BusinessTelephoneNumber','CarTelephoneNumber','Categories','Category',
-   'Children','Child','CompanyName','Department','Email1Address',
-   'Email2Address','Email3Address','FileAs','FirstName','Home2TelephoneNumber',
-   'HomeAddressCity','HomeAddressCountry','HomeAddressPostalCode',
-   'HomeAddressState','HomeAddressStreet','HomeFaxNumber','HomeTelephoneNumber',
-   'Alias','WeightedRank'],
-
-  // Page 2: Email
-  ['Attachment','Attachments','AttName','AttSize','Att0Id','AttMethod',
-   'AttRemoved','Body','BodySize','BodyTruncated','DateReceived','DisplayName',
-   'DisplayTo','Importance','MessageClass','Subject','Read','To','Cc','From',
-   'Reply_To','AllDayEvent','Categories','Category','DtStamp','EndTime',
-   'InstanceType','BusyStatus','Location','MeetingRequest','Organizer',
-   'RecurrenceId','Reminder','ResponseRequested','Recurrences','Recurrence',
-   'RecurrenceType','Until','Occurrences','Interval','DayOfWeek','DayOfMonth',
-   'WeekOfMonth','MonthOfYear','StartTime','Sensitivity','TimeZone',
-   'GlobalObjId','ThreadTopic','MIMEData','MIMETruncated','MIMESize',
-   'InternetCPID','Flag','Status','ContentClass','FlagType','CompleteTime',
-   'DisallowNewTimeProposal'],
-
-  // Page 3: AirNotify (deprecated)
-  [],
-
-  // Page 4: Calendar
-  ['TimeZone','AllDayEvent','Attendees','Attendee','Email','DisplayName',
-   'StartTime','Subject','Body','BodyTruncated','EndTime','Recurrence',
-   'Type','Until','Occurrences','Interval','DayOfWeek','DayOfMonth',
-   'WeekOfMonth','MonthOfYear','Sensitivity','BusyStatus','AllAttendeesString',
-   'MeetingStatus','Reminder','IsLeapmonth','CalendarType','IsRecurring',
-   'ResponseRequested','DisallowNewTimeProposal','Uid','OrganizerName',
-   'OrganizerEmail'],
-
-  // Page 5: Move
-  ['MoveItems','Move','SrcMsgId','SrcFldId','DstFldId','Response','Status','DstMsgId'],
-
-  // Page 6: GetItemEstimate
-  ['GetItemEstimate','Version','Collections','Collection','Class',
-   'CollectionId','DateTime','Estimate','Response','Status'],
-
-  // Page 7: FolderHierarchy
-  ['Folders','Folder','DisplayName','ServerId','ParentId','Type','Response',
-   'Status','ContentClass','Changes','Add','Delete','Update','SyncKey',
-   'FolderCreate','FolderDelete','FolderUpdate','FolderSync','Count'],
-
-  // Page 8: MeetingResponse
-  ['CalendarId','CollectionId','MeetingResponse','RequestId','Request',
-   'Result','Status','UserResponse','Version'],
-
-  // Page 9: Tasks
-  ['Body','BodySize','BodyTruncated','Categories','Category','Complete',
-   'DateCompleted','DueDate','UtcDueDate','Importance','Recurrence',
-   'RecurrenceType','RecurrenceStart','Until','Occurrences','Interval',
-   'DayOfMonth','DayOfWeek','WeekOfMonth','MonthOfYear','Regenerate',
-   'DeadOccur','ReminderSet','ReminderTime','Sensitivity','StartDate',
-   'UtcStartDate','Subject','NativeBodyType','ContentClass'],
-
-  // Page 10: ResolveRecipients
-  ['ResolveRecipients','Response','Status','Type','Recipient','DisplayName',
-   'EmailAddress','Certificates','Certificate','MiniCertificate','Options',
-   'To','CertificateRetrieval','RecipientCount','MaxCertificates',
-   'MaxAmbiguousRecipients','CertificateCount','Availability','StartTime',
-   'EndTime','MergedFreeBusy','Picture','MaxSize','Data','MaxPictures'],
-
-  // Page 11: ValidateCert
-  ['ValidateCert','Certificates','Certificate','CertificateChain','CheckCRL','Status'],
-
-  // Page 12: Contacts2
-  ['CustomerId','GovernmentId','IMAddress','IMAddress2','IMAddress3',
-   'ManagerName','CompanyMainPhone','AccountName','NickName','MMS'],
-
-  // Page 13: Ping
-  ['Ping','AutdState','Status','HeartbeatInterval','Folders','Folder','Id','Class','MaxFolders'],
-
-  // Page 14: Provision
-  ['Provision','Policies','Policy','PolicyType','PolicyKey','Data','Status',
-   'RemoteWipe','EASProvisionDoc','DevicePasswordEnabled',
-   'AlphanumericDevicePasswordRequired','RequireStorageCardEncryption',
-   'PasswordRecoveryEnabled','DocumentBrowseEnabled','AttachmentsEnabled',
-   'MinDevicePasswordLength','MaxInactivityTimeDeviceLock',
-   'MaxDevicePasswordFailedAttempts','MaxAttachmentSize',
-   'AllowSimpleDevicePassword','DevicePasswordExpiration','DevicePasswordHistory',
-   'AllowStorageCard','AllowCamera','RequireDeviceEncryption',
-   'AllowUnsignedApplications','AllowUnsignedInstallationPackages',
-   'MinDevicePasswordComplexCharacters','AllowWiFi','AllowTextMessaging',
-   'AllowPOPIMAPEmail','AllowBluetooth','AllowIrDA',
-   'RequireManualSyncWhenRoaming','AllowDesktopSync','MaxCalendarAgeFilter',
-   'AllowHTMLEmail','MaxEmailAgeFilter','MaxEmailBodyTruncationSize',
-   'MaxEmailHTMLBodyTruncationSize','RequireSignedSMIMEMessages',
-   'RequireEncryptedSMIMEMessages','RequireSignedSMIMEAlgorithm',
-   'RequireEncryptionSMIMEAlgorithm','AllowSMIMEEncryptionAlgorithmNegotiation',
-   'AllowSMIMESoftCerts','AllowBrowser','AllowConsumerEmail','AllowRemoteDesktop',
-   'AllowInternetSharing','UnapprovedInROMApplicationList','ApplicationName',
-   'ApprovedApplicationList','HashAlgorithm'],
-
-  // Page 15: Search
-  ['Search','Stores','Store','Name','Query','Options','Range','Status',
-   'Response','Result','Properties','Total','EqualTo','Value','And','Or',
-   'FreeText', null,'DeepTraversal','LongId','RebuildResults','LessThan',
-   'GreaterThan', null,'UserName','Password','ConversationId','Picture',
-   'MaxSize','MaxPictures'],
-
-  // Page 16: GAL
-  ['DisplayName','Phone','Office','Title','Company','Alias','FirstName',
-   'LastName','HomePhone','MobilePhone','EmailAddress','Picture','Status','Data'],
-
-  // Page 17: AirSyncBase
-  ['BodyPreference','Type','TruncationSize','AllOrNone', null,
-   'Body','Data','EstimatedDataSize','Truncated','Attachments','Attachment',
-   'DisplayName','FileReference','Method','ContentId','ContentLocation',
-   'IsInline','NativeBodyType','ContentType','Preview','BodyPartReference',
-   'BodyPart','Status'],
-
-  // Page 18: Settings
-  ['Settings','Status','Get','Set','Oof','OofState','StartTime','EndTime',
-   'OofMessage','AppliesToInternal','AppliesToExternalKnown',
-   'AppliesToExternalUnknown','Enabled','ReplyMessage','BodyType','Data',
-   'DevicePassword','Password','DeviceInformation','Model','IMEI','FriendlyName',
-   'OS','OSLanguage','PhoneNumber','UserInformation','EmailAddresses',
-   'SmimeEnabled','UserAgent','EnableOutboundSMS','MobileOperator',
-   'PrimarySmtpAddress','Accounts','Account','AccountId','AccountName',
-   'UserDisplayName','SendDisabled', null,'RightsManagementInformation'],
-
-  // Page 19: DocumentLibrary
-  ['LinkId','DisplayName','IsFolder','CreationDate','LastModifiedDate',
-   'IsHidden','ContentLength','ContentType'],
-
-  // Page 20: ItemOperations
-  ['ItemOperations','Fetch','Store','Options','Range','Total','Properties',
-   'Data','Status','Response','Version','Schema','Part','EmptyFolderContents',
-   'DeleteSubFolders','UserName','Password','Move','DstFldId','ConversationId',
-   'MoveAlways'],
-
-  // Page 21: ComposeMail
-  ['SendMail','SmartForward','SmartReply','SaveInSentItems','ReplaceMime',
-   null,'Source','FolderId','ItemId','LongId','InstanceId','MIME',
-   'ClientId','Status','AccountId'],
-
-  // Page 22: Email2
-  ['UmCallerId','UmUserNotes','UmAttDuration','UmAttOrder','ConversationId',
-   'ConversationIndex','LastVerbExecuted','LastVerbExecutionTime','ReceivedAsBcc',
-   'Sender','CalendarType','IsLeapMonth','AccountId','FirstDayOfWeek',
-   'MeetingMessageType', null,'IsDraft','Bcc','Send'],
-];
+export const EAS_PATH = '/Microsoft-Server-ActiveSync';
 
 /**
- * Reverse lookup: namespace:tagName -> {page, token}
- * Built lazily on first use.
+ * Protocol versions we are willing to speak, most preferred first.
+ *
+ * 14.1 leads deliberately. Our Sync/Calendar handling implements 14.x
+ * semantics; 16.x changed recurrence exceptions (InstanceId), the calendar
+ * workflow and draft handling, so negotiating 16.1 would produce requests we
+ * cannot correctly interpret. EAS-4-TbSync makes the same choice for the same
+ * reason. 16.1 is only required for Exchange Online, which also mandates
+ * OAuth 2.0 and therefore cannot be reached with Basic auth anyway.
  */
-let _reverseMap = null;
+export const VERSION_PREFERENCE = ['14.1', '14.0', '12.1', '12.0'];
 
-function getReverseMap() {
-  if (_reverseMap) return _reverseMap;
-  _reverseMap = new Map();
-  for (let page = 0; page < CODE_PAGES.length; page++) {
-    const tags = CODE_PAGES[page];
-    if (!tags || !tags.length) continue;
-    for (let i = 0; i < tags.length; i++) {
-      const name = tags[i];
-      if (!name) continue;
-      const key = `${page}:${name}`;
-      // Only register first occurrence (avoid duplicate overwrite)
-      if (!_reverseMap.has(key)) {
-        _reverseMap.set(key, { page, token: i + 0x05 });
-      }
-    }
-  }
-  return _reverseMap;
+/** Versions a server may advertise that are not valid client versions. */
+export const INVALID_CLIENT_VERSIONS = ['2.0', '2.1'];
+
+export const DEFAULT_VERSION = '14.1';
+
+/** Numeric form for comparisons: '14.1' → 141 */
+export function versionValue(v) {
+  const [major, minor = '0'] = String(v).split('.');
+  return parseInt(major, 10) * 10 + parseInt(minor, 10);
 }
 
-export const PAGE_NAMES = [
-  'AirSync', 'Contacts', 'Email', 'AirNotify', 'Calendar', 'Move',
-  'GetItemEstimate', 'FolderHierarchy', 'MeetingResponse', 'Tasks',
-  'ResolveRecipients', 'ValidateCert', 'Contacts2', 'Ping', 'Provision',
-  'Search', 'GAL', 'AirSyncBase', 'Settings', 'DocumentLibrary',
-  'ItemOperations', 'ComposeMail', 'Email2',
-];
+export const MIME_WBXML  = 'application/vnd.ms-sync.wbxml';
+export const MIME_RFC822 = 'message/rfc822';
 
-export const PAGE_BY_NAME = Object.fromEntries(PAGE_NAMES.map((n, i) => [n, i]));
+// ── EAS folder types (MS-ASCMD FolderSync Type) ──────────────────────
 
-export function lookupTag(pageIndex, token) {
-  const tags = CODE_PAGES[pageIndex];
-  if (!tags) return null;
-  return tags[token - 0x05] || null;
-}
-
-export function encodeTag(pageIndex, tagName) {
-  const map = getReverseMap();
-  return map.get(`${pageIndex}:${tagName}`) || null;
-}
-
-// EAS Folder Types
 export const FOLDER_TYPE = {
-  USER_GENERIC: 1,
-  INBOX: 2,
-  DRAFTS: 3,
-  DELETED: 4,
-  SENT: 5,
-  OUTBOX: 6,
-  TASKS: 7,
-  CALENDAR: 8,
-  CONTACTS: 9,
-  NOTES: 10,
-  JOURNAL: 11,
-  USER_MAIL: 12,
-  USER_CALENDAR: 13,
-  USER_CONTACTS: 14,
-  USER_TASKS: 15,
-  UNKNOWN: 18,
+  USER_GENERIC:  1,
+  INBOX:         2,
+  DRAFTS:        3,
+  DELETED:       4,
+  SENT:          5,
+  OUTBOX:        6,
+  TASKS:         7,
+  CALENDAR:      8,
+  CONTACTS:      9,
+  NOTES:        10,
+  JOURNAL:      11,
+  USER_MAIL:    12,
+  USER_CALENDAR:13,
+  USER_CONTACTS:14,
+  USER_TASKS:   15,
+  USER_JOURNAL: 16,
+  USER_NOTES:   17,
+  UNKNOWN:      18,
+  RECIPIENT_CACHE: 19,
+};
+
+/** EAS folder type → Thunderbird special-folder role. */
+export const FOLDER_ROLE = {
+  [FOLDER_TYPE.INBOX]:   'inbox',
+  [FOLDER_TYPE.DRAFTS]:  'drafts',
+  [FOLDER_TYPE.DELETED]: 'trash',
+  [FOLDER_TYPE.SENT]:    'sent',
+  [FOLDER_TYPE.OUTBOX]:  'outbox',
+  [FOLDER_TYPE.JOURNAL]: 'archives',
 };
 
 export const FOLDER_TYPE_NAME = {
-  2: 'Inbox', 3: 'Drafts', 4: 'Trash', 5: 'Sent', 6: 'Outbox',
+  [FOLDER_TYPE.INBOX]:   'Inbox',
+  [FOLDER_TYPE.DRAFTS]:  'Drafts',
+  [FOLDER_TYPE.DELETED]: 'Trash',
+  [FOLDER_TYPE.SENT]:    'Sent',
+  [FOLDER_TYPE.OUTBOX]:  'Outbox',
 };
 
-// EAS body type preferences
+/** Folder types we mirror into Thunderbird's mail tree. */
+export const MAIL_FOLDER_TYPES = new Set([
+  FOLDER_TYPE.USER_GENERIC, FOLDER_TYPE.INBOX, FOLDER_TYPE.DRAFTS,
+  FOLDER_TYPE.DELETED, FOLDER_TYPE.SENT, FOLDER_TYPE.OUTBOX,
+  FOLDER_TYPE.USER_MAIL,
+]);
+
+// ── Body types (MS-ASAIRS) ───────────────────────────────────────────
+
 export const BODY_TYPE = { PLAIN: 1, HTML: 2, RTF: 3, MIME: 4 };
 
-// EAS protocol version we negotiate
-export const EAS_VERSION = '14.1';
-export const DEVICE_TYPE = 'iPhone';
-export const USER_AGENT = 'Apple-iPhone/702.67 (EAS Thunderbird Connector)';
+/** Sync/Options/MIMESupport values. */
+export const MIME_SUPPORT = { NEVER: 0, SMIME_ONLY: 1, ALWAYS: 2 };
+
+// ── Status codes ─────────────────────────────────────────────────────
 
 /**
- * Predefined device profiles that the user can choose from.
- * Matching a profile already approved by the Exchange admin avoids the
- * new-device quarantine period.
+ * MS-ASCMD common status codes that matter to us. From 14.0 onwards almost
+ * every error arrives as a WBXML <Status> inside an HTTP 200 response — a
+ * client that only inspects HTTP status codes sees "200 OK" and an empty
+ * mailbox.
  */
+export const STATUS = {
+  SUCCESS:                    '1',
+  INVALID_SYNC_KEY:           '3',
+  PROTOCOL_ERROR:             '4',
+  SERVER_ERROR:               '5',
+  SYNC_STATE_CORRUPT:         '9',
+  FOLDER_HIERARCHY_CHANGED:   '12',
+  USER_DISABLED_FOR_SYNC:     '126',
+  DEVICE_BLOCKED:             '129', // DeviceIsBlockedForThisUser
+  ACCESS_DENIED:              '130',
+  SYNC_STATE_NOT_FOUND:       '131',
+  REMOTE_WIPE_REQUESTED:      '140',
+  DEVICE_NOT_PROVISIONABLE:   '141',
+  DEVICE_NOT_PROVISIONED:     '142',
+  POLICY_REFRESH:             '143',
+  INVALID_POLICY_KEY:         '144',
+  EXTERNALLY_MANAGED:         '145',
+  // 165 is DeviceInformationRequired, NOT a quarantine signal. Earlier notes in
+  // this project recorded it as "device quarantined" because a quarantine mail
+  // happened to arrive at the same time, and a whole error path was built
+  // around that misreading. From 14.1 the server expects
+  // Settings/DeviceInformation inside the Provision request itself; omit it and
+  // Exchange answers 165 before any policy is issued.
+  DEVICE_INFORMATION_REQUIRED: '165',
+  MAX_DEVICES_REACHED:        '177',
+};
+
+/** Statuses that mean "run the Provision handshake, then retry". */
+export const PROVISION_REQUIRED_STATUS = new Set([
+  STATUS.DEVICE_NOT_PROVISIONED,
+  STATUS.POLICY_REFRESH,
+  STATUS.INVALID_POLICY_KEY,
+  STATUS.EXTERNALLY_MANAGED,
+]);
+
 /**
- * Resolve the active device profile for an account.
- * Returns the matching predefined profile, or the account's customProfile
- * object when deviceProfileId === 'Custom'.
+ * Statuses that mean "the server refuses this device, stop hammering it".
+ *
+ * Deliberately narrow. A code that lands here silences the account for half an
+ * hour, so only values whose meaning is unambiguous belong in this set.
  */
+export const DEVICE_BLOCKED_STATUS = new Set([
+  STATUS.USER_DISABLED_FOR_SYNC, // ActiveSync switched off for this mailbox
+  STATUS.DEVICE_BLOCKED,         // explicit block list
+  STATUS.MAX_DEVICES_REACHED,    // device partnership quota exhausted
+]);
+
+/** Statuses that mean "throw away the sync key and start the collection over". */
+export const SYNC_KEY_INVALID_STATUS = new Set([
+  STATUS.INVALID_SYNC_KEY,
+  STATUS.SYNC_STATE_CORRUPT,
+  STATUS.FOLDER_HIERARCHY_CHANGED,
+  STATUS.SYNC_STATE_NOT_FOUND,
+]);
+
+/** Ping status codes (MS-ASCMD 2.2.3.177.2). */
+export const PING_STATUS = {
+  EXPIRED:            '1', // heartbeat elapsed, nothing changed
+  CHANGES:            '2', // folders listed in the response have changes
+  MISSING_PARAMETERS: '3',
+  SYNTAX_ERROR:       '4',
+  INVALID_HEARTBEAT:  '5', // response carries <Limit> = allowed value
+  TOO_MANY_FOLDERS:   '6', // response carries <Limit> = MaxFolders
+  HIERARCHY_STALE:    '7',
+  SERVER_ERROR:       '8',
+};
+
+// ── Heartbeat / Ping tuning ──────────────────────────────────────────
+
+export const HEARTBEAT = {
+  INITIAL: 8 * 60,   // seconds — conservative start, see MS guidance
+  MIN:     3 * 60,
+  MAX:     59 * 60,
+  STEP_UP: 2 * 60,   // grow slowly after a clean heartbeat
+};
+
+// ── Device profiles ──────────────────────────────────────────────────
+
+/**
+ * A profile is the client's fingerprint on the wire: DeviceType, User-Agent,
+ * protocol version and the Settings/DeviceInformation payload.
+ *
+ * Two things make this more than cosmetics:
+ *
+ * 1. Exchange may run an Allow/Block/Quarantine (ABQ) rule keyed on
+ *    DeviceType and User-Agent, and it enforces a per-mailbox limit on device
+ *    partnerships (commonly 5). A measurement against a production Exchange
+ *    2019 on 2026-08-07 returned HTTP 200 for `WindowsOutlook15` and
+ *    `iPhone`, and HTTP 403 for `Android` and `TBSync`. Whether that was an
+ *    ABQ rule or an exhausted device quota was not resolved — a device-limit
+ *    notification arrived during the run. Either way a well-known DeviceType
+ *    is the safer choice.
+ *
+ * 2. Servers switch behaviour on the DeviceType string. Presenting as
+ *    `WindowsOutlook15` gets you longer allowed response times and large sync
+ *    batches, but also single-contact-folder handling and no Notes sync. It
+ *    also implies protocol version 14.0 — a client calling itself
+ *    WindowsOutlook15 while asking for 16.1 is a fingerprint that does not
+ *    exist in the wild.
+ *
+ * `maxVersion` therefore caps negotiation per profile.
+ *
+ * IMPORTANT for the user-facing UI: Exchange keys a device partnership on
+ * DeviceId **and** DeviceType. Switching profiles registers a *new* device and
+ * consumes another slot of the mailbox quota — the old entry has to be removed
+ * in OWA manually.
+ */
+export const DEVICE_PROFILES = [
+  {
+    id:           'WindowsOutlook15',
+    label:        'Outlook Desktop (Windows) — verified accepted',
+    deviceType:   'WindowsOutlook15',
+    userAgent:    'Outlook/16.0 (16.0.17932.20884; C2R; x64)',
+    model:        'WindowsOutlook15',
+    os:           '',        // real Outlook sends neither OS nor OSLanguage
+    osLanguage:   '',
+    friendlyName: 'Outlook',
+    maxVersion:   '14.0',    // Outlook's EAS stack negotiates exactly 14.0
+    windowSize:   512,       // Z-Push: "MS Outlook 2013+ request up to 512 items"
+    sendSettings: false,     // Outlook does not send Settings/DeviceInformation
+    verified:     true,
+    note:         'Closest match to a real Outlook desktop client. Use this if the server rejects other device types.',
+  },
+  {
+    id:           'iPhone',
+    label:        'iPhone (iOS Mail) — verified accepted',
+    deviceType:   'iPhone',
+    userAgent:    'Apple-iPhone14C1/2011.223',
+    model:        'iPhone',
+    os:           'iOS 17.4.1',
+    osLanguage:   'en-US',
+    friendlyName: 'iPhone',
+    maxVersion:   '14.1',
+    windowSize:   100,
+    sendSettings: true,
+    verified:     true,
+    note:         'Second fingerprint verified as accepted by the reference server.',
+  },
+  {
+    id:           'Thunderbird',
+    label:        'Thunderbird (honest) — may be blocked by ABQ rules',
+    deviceType:   'Thunderbird',
+    userAgent:    'Thunderbird/140.9',
+    model:        'Thunderbird',
+    os:           '',        // filled at runtime
+    osLanguage:   '',        // filled at runtime
+    friendlyName: 'Thunderbird',
+    maxVersion:   '14.1',
+    windowSize:   100,
+    sendSettings: true,
+    verified:     false,
+    note:         'Truthful fingerprint. A server with an Allow/Block/Quarantine whitelist will answer HTTP 403.',
+  },
+  {
+    id:           'Android',
+    label:        'Android Mail (Samsung) — may be blocked by ABQ rules',
+    deviceType:   'Android',
+    userAgent:    'Android-Mail/2026.03.09.884664556.Release',
+    model:        'SM-G975F',
+    os:           'Android 12',
+    osLanguage:   'en-US',
+    friendlyName: 'SM-G975F',   // real Android reports the model number here
+    maxVersion:   '14.1',
+    windowSize:   100,
+    sendSettings: true,
+    verified:     false,
+    note:         'Returned HTTP 403 in the reference measurement.',
+  },
+];
+
+export const DEFAULT_PROFILE_ID = 'WindowsOutlook15';
+
 function _detectOS() {
   const ua = navigator.userAgent;
   if (ua.includes('Windows'))   return 'Windows';
@@ -261,68 +287,50 @@ function _detectTBVersion() {
   return m ? m[1] : null;
 }
 
-export function resolveProfile(account) {
+/**
+ * Resolve the active device profile for an account.
+ * Returns the matching predefined profile, or the account's customProfile
+ * merged over the default when deviceProfileId === 'Custom'.
+ */
+export function resolveProfile(account = {}) {
+  const base = DEVICE_PROFILES.find(p => p.id === DEFAULT_PROFILE_ID);
+
   if (account.deviceProfileId === 'Custom' && account.customProfile) {
-    // Spread over the first profile so any unset fields have sensible defaults
-    return { ...DEVICE_PROFILES[0], ...account.customProfile, id: 'Custom' };
+    return {
+      ...base,
+      maxVersion: DEFAULT_VERSION,
+      verified:   false,
+      ...account.customProfile,
+      id: 'Custom',
+    };
   }
-  const profile = DEVICE_PROFILES.find(p => p.id === account.deviceProfileId) || DEVICE_PROFILES[0];
-  // For the Thunderbird profile, OS, userAgent and label are filled in at runtime
-  // so they reflect the actual installed version and platform.
+
+  const profile = DEVICE_PROFILES.find(p => p.id === account.deviceProfileId) || base;
+
   if (profile.id === 'Thunderbird') {
-    const os         = _detectOS();
-    const version    = _detectTBVersion();
-    const osLanguage = navigator.language || '';
-    const ua         = version ? `Thunderbird/${version}` : profile.userAgent;
-    const label      = version
-      ? `Mozilla Thunderbird ${version} (${os || 'Desktop'})`
-      : profile.label;
-    return { ...profile, os, osLanguage, userAgent: ua, label };
+    const version = _detectTBVersion();
+    const os      = _detectOS();
+    return {
+      ...profile,
+      os,
+      osLanguage: navigator.language || '',
+      userAgent:  version ? `Thunderbird/${version}` : profile.userAgent,
+      label:      version ? `Mozilla Thunderbird ${version} (${os || 'Desktop'})` : profile.label,
+    };
   }
+
   return profile;
 }
 
-export const DEVICE_PROFILES = [
-  {
-    // Default — honest Thunderbird profile. OS, language, version and label are
-    // filled in at runtime by resolveProfile() from navigator.userAgent / navigator.language.
-    id:          'Thunderbird',
-    label:       'Mozilla Thunderbird 140 (Desktop)',
-    deviceType:  'Thunderbird',
-    userAgent:   'Thunderbird/140.9',
-    model:       'Thunderbird',
-    os:          '',      // filled at runtime
-    osLanguage:  '',      // filled at runtime
-    friendlyName:'Thunderbird',
-  },
-  {
-    id:          'iPhone',
-    label:       'iPhone (iOS Mail)',
-    deviceType:  'iPhone',
-    userAgent:   'Apple-iPhone/702.67',
-    model:       'iPhone',
-    os:          'iOS 17.4.1',
-    osLanguage:  'en-US',
-    friendlyName:'iPhone',
-  },
-  {
-    id:          'WindowsOutlook15',
-    label:       'Outlook 2016 (Windows)',
-    deviceType:  'WindowsOutlook15',
-    userAgent:   'Outlook/16.0 (16.0.19426.20076; x86)',
-    model:       'WindowsOutlook15',
-    os:          '',
-    osLanguage:  '',
-    friendlyName:'Outlook',
-  },
-  {
-    id:          'Android',
-    label:       'Android Mail (Samsung)',
-    deviceType:  'Android',
-    userAgent:   'Android-Mail/2026.03.09.884664556.Release',
-    model:       'SM-G975F',
-    os:          'Android 12',
-    osLanguage:  'en-US',
-    friendlyName:'SM-G975F',  // real Android: FriendlyName = model number (same as Model)
-  },
-];
+/** Generate a fresh EAS DeviceId: RFC 4122 v4, uppercase hex, no hyphens. */
+export function generateDeviceId() {
+  return crypto.randomUUID().replace(/-/g, '').toUpperCase();
+}
+
+/**
+ * MS-ASHTTP restricts DeviceId to 1..32 characters, ALPHA/DIGIT only.
+ * 32 hex characters is exactly the maximum.
+ */
+export function isValidDeviceId(id) {
+  return typeof id === 'string' && /^[A-Za-z0-9]{1,32}$/.test(id);
+}

@@ -7,105 +7,75 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      font-size: 14px;
-      background: #f5f5f5;
-      color: #333;
-      padding: 24px;
-      max-width: 520px;
-      margin: 0 auto;
+      font-size: 14px; background: #f5f5f5; color: #333;
+      padding: 24px; max-width: 640px; margin: 0 auto;
     }
     h1 { font-size: 20px; margin-bottom: 4px; color: #1a73e8; }
-    .subtitle { color: #666; font-size: 13px; margin-bottom: 24px; }
+    .subtitle { color: #666; font-size: 13px; margin-bottom: 20px; }
     .card {
-      background: white;
-      border-radius: 8px;
-      padding: 20px;
-      box-shadow: 0 1px 4px rgba(0,0,0,.12);
-      margin-bottom: 16px;
+      background: #fff; border-radius: 8px; padding: 20px;
+      box-shadow: 0 1px 4px rgba(0,0,0,.12); margin-bottom: 16px;
     }
-    h2 { font-size: 15px; margin-bottom: 16px; color: #333; }
+    h2 { font-size: 15px; margin-bottom: 14px; }
     label { display: block; font-weight: 600; margin-bottom: 4px; font-size: 13px; }
-    select {
-      width: 100%;
-      padding: 8px 10px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      font-size: 14px;
-      background: white;
+    select, input[type=text], input[type=password], input[type=email], input[type=number] {
+      width: 100%; padding: 8px 10px; border: 1px solid #ddd;
+      border-radius: 4px; font-size: 14px; background: #fff; outline: none;
     }
-    input[type=text], input[type=password], input[type=email], input[type=number] {
-      width: 100%;
-      padding: 8px 10px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      font-size: 14px;
-      outline: none;
-      transition: border-color .15s;
-    }
-    input:focus { border-color: #1a73e8; }
+    input:focus, select:focus { border-color: #1a73e8; }
     .field { margin-bottom: 14px; }
     .field:last-child { margin-bottom: 0; }
-    .hint { font-size: 12px; color: #888; margin-top: 3px; }
+    .hint { font-size: 12px; color: #888; margin-top: 3px; line-height: 1.45; }
     .row { display: flex; gap: 10px; }
     .row .field { flex: 1; }
     button {
-      padding: 9px 20px;
-      border: none;
-      border-radius: 4px;
-      font-size: 14px;
-      cursor: pointer;
-      font-weight: 600;
+      padding: 9px 18px; border: none; border-radius: 4px;
+      font-size: 14px; cursor: pointer; font-weight: 600;
     }
-    .btn-primary { background: #1a73e8; color: white; }
-    .btn-primary:hover { background: #1558b0; }
+    button:disabled { opacity: .55; cursor: default; }
+    .btn-primary   { background: #1a73e8; color: #fff; }
     .btn-secondary { background: #f1f3f4; color: #333; }
-    .btn-secondary:hover { background: #e2e4e7; }
-    .btn-row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; }
-    .status-msg { padding: 10px 14px; border-radius: 4px; margin-top: 12px; font-size: 13px; }
-    .status-msg.error   { background: #fce8e6; color: #c62828; }
-    .status-msg.success { background: #e6f4ea; color: #2e7d32; }
+    .btn-row { display: flex; gap: 10px; justify-content: flex-end; margin-top: 16px; flex-wrap: wrap; }
+    .btn-row.left { justify-content: flex-start; }
+    .status-msg { padding: 10px 14px; border-radius: 4px; margin-top: 12px; font-size: 13px; line-height: 1.5; }
+    .status-msg.error   { background: #fce8e6; color: #b3261e; }
+    .status-msg.success { background: #e6f4ea; color: #1e6b32; }
+    .status-msg.warn    { background: #fef7e0; color: #8a6100; }
     .status-msg.info    { background: #e8f0fe; color: #174ea6; }
     .account-list { list-style: none; }
     .account-item {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 10px 0;
-      border-bottom: 1px solid #eee;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 0; border-bottom: 1px solid #eee; gap: 12px;
     }
     .account-item:last-child { border-bottom: none; }
     .account-name { font-weight: 600; }
-    .account-host { font-size: 12px; color: #888; }
-    .btn-remove { background: none; border: 1px solid #ddd; color: #c62828; padding: 4px 10px; font-size: 12px; }
-    .btn-remove:hover { background: #fce8e6; }
+    .account-meta { font-size: 12px; color: #888; }
+    .btn-remove {
+      background: none; border: 1px solid #ddd; color: #b3261e;
+      padding: 4px 10px; font-size: 12px;
+    }
     #accounts-empty { color: #888; font-style: italic; font-size: 13px; }
-    #debug-log {
-      display: none;
-      background: #1e1e1e;
-      color: #d4d4d4;
-      font-family: 'Cascadia Code', 'Consolas', monospace;
-      font-size: 11px;
-      padding: 10px 12px;
-      border-radius: 4px;
-      margin-top: 12px;
-      max-height: 160px;
-      overflow-y: auto;
-      line-height: 1.5;
+    .log {
+      display: none; background: #1e1e1e; color: #d4d4d4;
+      font-family: 'Cascadia Code', Consolas, monospace; font-size: 11px;
+      padding: 10px 12px; border-radius: 4px; margin-top: 12px;
+      max-height: 200px; overflow-y: auto; line-height: 1.5; white-space: pre-wrap;
     }
-    #custom-profile-section {
-      margin-top: 14px;
-      padding: 14px;
-      border: 1px solid #e0e0e0;
-      border-radius: 4px;
-      background: #fafafa;
+    .advanced { margin-top: 14px; padding: 14px; border: 1px solid #e6e6e6; border-radius: 4px; background: #fafafa; }
+    .advanced > summary { cursor: pointer; font-weight: 600; font-size: 13px; color: #444; }
+    .advanced > *:not(summary) { margin-top: 12px; }
+    .section-title {
+      font-size: 11px; font-weight: 700; color: #666;
+      text-transform: uppercase; letter-spacing: .05em; margin-bottom: 10px;
     }
-    .custom-section-title {
-      font-size: 11px;
-      font-weight: 700;
-      color: #666;
-      text-transform: uppercase;
-      letter-spacing: .05em;
-      margin-bottom: 12px;
+    table.probe { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+    table.probe th, table.probe td { text-align: left; padding: 5px 6px; border-bottom: 1px solid #eee; }
+    table.probe th { color: #666; font-weight: 600; }
+    .ok   { color: #1e6b32; font-weight: 600; }
+    .bad  { color: #b3261e; font-weight: 600; }
+    .badge-warn {
+      display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 6px;
+      border-radius: 3px; background: #fef7e0; color: #8a6100; margin-left: 6px;
     }
   </style>
 </head>
@@ -113,93 +83,184 @@
   <h1>EAS Mail Connector</h1>
   <p class="subtitle">Connect Thunderbird to Exchange ActiveSync servers</p>
 
-  <!-- Existing accounts -->
-  <div class="card" id="accounts-card">
+  <div class="card">
     <h2>Configured Accounts</h2>
     <ul class="account-list" id="account-list">
       <li id="accounts-empty">No accounts configured yet.</li>
     </ul>
+    <div id="capabilities" class="status-msg info" style="margin-top:14px"></div>
   </div>
 
-  <!-- Add new account -->
+  <!-- Thunderbird cannot delete "none"-type account nodes from its own UI, so
+       a node left behind by a failed setup is otherwise unreachable. -->
+  <div class="card" id="orphans-card" style="display:none">
+    <h2>Leftover account nodes</h2>
+    <p class="hint" style="margin-bottom:12px">
+      These folder-pane nodes were created by this add-on but no configured account claims them —
+      typically from a setup that failed part way, or from reinstalling the add-on. Thunderbird
+      offers no Delete button for this kind of account, so remove them here.
+      <b>Deleting a node also deletes the mail stored in it.</b>
+    </p>
+    <ul class="account-list" id="orphan-list"></ul>
+  </div>
+
   <div class="card">
     <h2>Add New Account</h2>
-    <div class="field">
-      <label for="host">EAS Server</label>
-      <input type="text" id="host" placeholder="eas.example.com" value="eas.example.com">
-      <div class="hint">The Exchange ActiveSync server hostname (port 443 / HTTPS)</div>
-    </div>
+
     <div class="row">
       <div class="field">
         <label for="username">Username / Email</label>
-        <input type="email" id="username" placeholder="user@domain.org">
+        <input type="text" id="username" placeholder="user@domain.org" autocomplete="username">
+        <div class="hint">The login, usually the full mailbox address</div>
       </div>
       <div class="field">
-        <label for="email">Display Email</label>
-        <input type="email" id="email" placeholder="Same as username">
-        <div class="hint">Optional, if different from username</div>
+        <label for="display-name">Your Name</label>
+        <input type="text" id="display-name" placeholder="Jane Doe">
+        <div class="hint">Shown as the sender on outgoing mail</div>
       </div>
     </div>
+
     <div class="field">
       <label for="password">Password</label>
-      <input type="password" id="password" placeholder="Your password">
+      <input type="password" id="password" placeholder="Your password" autocomplete="current-password">
     </div>
-    <div class="field">
-      <label for="device-profile">Device Profile (User-Agent)</label>
-      <select id="device-profile">
-        <option value="Thunderbird" selected>Mozilla Thunderbird (Desktop) – detected at runtime</option>
-        <option value="iPhone">iPhone – Apple-iPhone/702.67 (iOS Mail)</option>
-        <option value="WindowsOutlook15">Outlook 2016 – Outlook/16.0 (16.0.19426.20076; x86)</option>
-        <option value="Android">Android Mail – Android-Mail/2026.03.09… (Samsung)</option>
-        <option value="Custom">Custom…</option>
-      </select>
-      <div class="hint">Choose a profile already approved by the Exchange admin to skip the quarantine waiting period.</div>
 
+    <div class="field">
+      <label for="host">EAS Server</label>
+      <input type="text" id="host" placeholder="eas.example.com">
+      <div class="hint">Leave empty and press <b>Find server</b> to look it up via Autodiscover.</div>
+    </div>
+
+    <div class="btn-row left">
+      <button class="btn-secondary" id="btn-autodiscover">Find server</button>
+      <button class="btn-secondary" id="btn-ews">Check for EWS first</button>
+    </div>
+
+    <div class="field" style="margin-top:16px">
+      <label for="device-profile">Device Profile</label>
+      <select id="device-profile"></select>
+      <div class="hint" id="profile-hint"></div>
+      <div class="hint">
+        Exchange identifies a device by <b>DeviceId + DeviceType</b>. Changing this profile later
+        registers an additional device and uses another slot of the mailbox device quota
+        (commonly 5) — the old entry has to be deleted in OWA by hand.
+      </div>
+
+      <!-- Belongs with the profile choice, not under Advanced: selecting
+           "Custom…" without these fields in sight leaves nowhere to type. -->
       <div id="custom-profile-section" style="display:none">
-        <div class="custom-section-title">Custom Profile Fields</div>
+        <div class="section-title">Custom fingerprint</div>
+        <div class="hint" style="margin-bottom:12px">
+          Pre-filled from the profile selected before. Only invent values here if you know one the
+          server accepts — <b>Compare device profiles</b> under Advanced can tell you.
+        </div>
         <div class="row">
           <div class="field">
             <label for="custom-device-type">Device Type *</label>
             <input type="text" id="custom-device-type" placeholder="e.g. iPhone">
-            <div class="hint">EAS DeviceType URL parameter</div>
+            <div class="hint">The <code>DeviceType</code> URL parameter</div>
           </div>
           <div class="field">
             <label for="custom-model">Device Model *</label>
             <input type="text" id="custom-model" placeholder="e.g. iPhone">
-            <div class="hint">Shown as Gerätemodell in OWA</div>
+            <div class="hint">Shown in the OWA device list</div>
           </div>
         </div>
         <div class="field">
           <label for="custom-user-agent">User-Agent *</label>
-          <input type="text" id="custom-user-agent" placeholder="e.g. Apple-iPhone/702.67 (EAS Thunderbird Connector)">
-          <div class="hint">HTTP User-Agent header and EAS UserAgent field</div>
+          <input type="text" id="custom-user-agent" placeholder="e.g. Apple-iPhone14C1/2011.223">
         </div>
         <div class="row">
           <div class="field">
             <label for="custom-os">OS</label>
-            <input type="text" id="custom-os" placeholder="e.g. iOS 17.4.1">
-            <div class="hint">Optional — leave empty to omit</div>
+            <input type="text" id="custom-os" placeholder="leave empty to omit">
           </div>
           <div class="field">
             <label for="custom-os-language">OS Language</label>
-            <input type="text" id="custom-os-language" placeholder="e.g. en-US">
-            <div class="hint">Optional — leave empty to omit</div>
+            <input type="text" id="custom-os-language" placeholder="leave empty to omit">
           </div>
         </div>
-        <div class="field">
-          <label for="custom-friendly-name">Friendly Name</label>
-          <input type="text" id="custom-friendly-name" placeholder="e.g. Thunderbird EAS">
-          <div class="hint">Optional base name — account email is appended automatically</div>
+        <div class="row">
+          <div class="field">
+            <label for="custom-friendly-name">Friendly Name</label>
+            <input type="text" id="custom-friendly-name" placeholder="e.g. Thunderbird EAS">
+          </div>
+          <div class="field">
+            <label for="custom-max-version">Max protocol version</label>
+            <select id="custom-max-version">
+              <option value="14.1" selected>14.1</option>
+              <option value="14.0">14.0</option>
+              <option value="12.1">12.1</option>
+            </select>
+            <div class="hint">14.0 is what a real Outlook fingerprint negotiates</div>
+          </div>
         </div>
       </div>
     </div>
-    <div class="field">
-      <label for="sync-interval">Sync Interval (minutes)</label>
-      <input type="number" id="sync-interval" value="5" min="1" max="60">
-    </div>
+
+    <details class="advanced">
+      <summary>Advanced</summary>
+
+      <div class="field">
+        <label for="mailbox-address">Mailbox address</label>
+        <input type="email" id="mailbox-address" placeholder="Same as the login">
+        <div class="hint">
+          Only needed when the login above is not the mailbox address itself — for example a bare
+          account name. Autodiscover and the folder-pane label use this address.
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="sync-interval">Poll interval (minutes)</label>
+          <input type="number" id="sync-interval" value="5" min="1" max="60">
+        </div>
+        <div class="field">
+          <label for="filter-type">Sync messages from</label>
+          <select id="filter-type">
+            <option value="0" selected>All</option>
+            <option value="1">Last day</option>
+            <option value="2">Last 3 days</option>
+            <option value="3">Last week</option>
+            <option value="4">Last 2 weeks</option>
+            <option value="5">Last month</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row">
+        <div class="field">
+          <label for="auth-encoding">Credential encoding</label>
+          <select id="auth-encoding">
+            <option value="utf-8" selected>UTF-8 (default)</option>
+            <option value="iso-8859-1">ISO-8859-1 (what Outlook sends)</option>
+          </select>
+          <div class="hint">Only matters for non-ASCII passwords. If a password with umlauts is
+            rejected as wrong, try ISO-8859-1.</div>
+        </div>
+        <div class="field">
+          <label for="push">Push (Ping)</label>
+          <select id="push">
+            <option value="yes" selected>Enabled — near-real-time</option>
+            <option value="no">Disabled — poll only</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="section-title" style="margin-top:16px">Server diagnostics</div>
+      <div class="hint">
+        <b>Compare device profiles</b> sends one minimal FolderSync per profile using the same
+        DeviceId and reports which fingerprints the server accepts. Exchange may still register one
+        device partnership per DeviceType — check the mobile device list in OWA afterwards.
+      </div>
+      <div class="btn-row left">
+        <button class="btn-secondary" id="btn-probe">Compare device profiles</button>
+      </div>
+      <div id="probe-result"></div>
+    </details>
 
     <div id="status-msg" class="status-msg info" style="display:none"></div>
-    <div id="debug-log"></div>
+    <div id="debug-log" class="log"></div>
 
     <div class="btn-row">
       <button class="btn-secondary" id="btn-test">Test Connection</button>

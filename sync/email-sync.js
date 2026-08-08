@@ -1,224 +1,343 @@
 /**
- * Email synchronisation logic.
+ * Per-account synchronisation.
  *
- * Responsibilities:
- *  - Sync EAS folder hierarchy → Thunderbird local folder tree
- *  - Sync EAS messages → import as EML into Thunderbird
- *  - Propagate deletions and read-flag changes back to server
- *  - Track EAS ServerId ↔ Thunderbird message ID mappings
+ * Mirrors the EAS folder hierarchy into a Thunderbird folder tree, pulls
+ * messages as raw MIME, and pushes read-flag and delete changes back.
+ *
+ * Two behaviours here are load-bearing and easy to get wrong:
+ *
+ *  - A Sync with SyncKey=0 is a *priming* request. The server answers with a
+ *    fresh key and deliberately no items; the data only arrives on the next
+ *    request. Treating the priming answer as "no changes" makes the first sync
+ *    of every folder silently return nothing, and the mailbox only starts
+ *    filling on the following cycle.
+ *
+ *  - From protocol version 14.0 errors travel as WBXML <Status> inside HTTP
+ *    200 responses. The transport layer maps those onto typed errors; this
+ *    layer reacts to the codes rather than to HTTP.
  */
 
-import { EasClient }    from '../eas/client.js';
+import { EasClient, EasError, ERR } from '../eas/client.js';
 import {
   buildFolderSync, parseFolderSync,
   buildSync, parseSync,
   buildItemOperationsFetch, parseItemOperationsFetch,
-  buildSettings,
+  buildSettings, parseSettings,
+  FILTER_TYPE, DEFAULT_TRUNCATION_SIZE,
 } from '../eas/commands.js';
-import { FOLDER_TYPE, resolveProfile }  from '../eas/protocol.js';
+import {
+  FOLDER_ROLE, MAIL_FOLDER_TYPES,
+  STATUS, SYNC_KEY_INVALID_STATUS, PING_STATUS, HEARTBEAT,
+  resolveProfile,
+} from '../eas/protocol.js';
 
-// Root folder name is derived from the account email at runtime — see _ensureRootFolder()
-
-// ─────────────────────────────────────────────────────────────────
-// AccountSync – manages one EAS account
-// ─────────────────────────────────────────────────────────────────
+/** How long to stay quiet after the server refused the device. */
+const BLOCKED_BACKOFF_MS = 30 * 60 * 1000;
+/** Cap on Sync round trips per folder per cycle, so a server that keeps
+ *  answering MoreAvailable cannot spin forever. */
+const MAX_SYNC_PAGES = 200;
 
 export class AccountSync {
-  constructor(account) {
+  constructor(account, opts = {}) {
     this.account = account;
-    this.client  = new EasClient({
+    this.log = opts.log || ((...a) => console.log(`[EAS:${account.username}]`, ...a));
+
+    this.client = new EasClient({
       ...account,
-      onPolicyKeyUpdated: (key) => this._savePolicyKey(key),
+      log: this.log,
+      onPolicyKeyUpdated:   key => this._patchAccount({ policyKey: key }),
+      onVersionNegotiated:  v   => this._patchAccount({ easVersion: v }),
+      onResyncRequired:     ()  => { this._resyncPending = true; },
     });
+
+    this.profile   = resolveProfile(account);
+    this.tbAccount = null;      // MailAccount or MailFolder acting as root
+    this.pushAbort = null;
+    this.pushing   = false;
+    this._maps     = null;      // { easFolderId: { easServerId: tbMessageId } }
+    this._revMap   = null;      // { tbMessageId: { easFolderId, easServerId } }
+    this._mapsDirty = new Set();
+    this._resyncPending = false;
   }
 
-  // ── Initial setup ─────────────────────────────────────────────
+  // ── Backoff ───────────────────────────────────────────────────────
 
-  async initialize() {
-    console.log('[EAS] Initializing account:', this.account.username, '@', this.account.host);
-
-    // Negotiate EAS version
-    try {
-      const info = await this.client.options();
-      console.log('[EAS] Negotiated version:', info.chosen, '| note:', info.note || 'ok');
-    } catch (e) {
-      console.warn('[EAS] OPTIONS failed, using default version:', e.message);
-    }
-
-    // Register device info with server
-    try {
-      const profile = resolveProfile(this.account);
-      await this.client.request('Settings', buildSettings(profile, { email: this.account.email || this.account.username }));
-      console.log('[EAS] Device registration OK');
-    } catch (e) {
-      console.warn('[EAS] Settings/DeviceInformation failed (non-fatal):', e.message);
-    }
-
-    // Find or create top-level Thunderbird account node
-    this.tbRootFolder = await this._ensureTbAccount();
-    console.log('[EAS] TB account ready:', this.tbRootFolder?.name || this.tbRootFolder?.id);
+  /**
+   * True while the account is inside a backoff window.
+   *
+   * Real clients do not hammer a server that has refused them. Without this,
+   * every alarm tick fires a fresh Provision request and Exchange generates
+   * another quarantine notification mail to the user for each one.
+   */
+  isBackingOff() {
+    const until = this.account.backoffUntil || 0;
+    return Date.now() < until;
   }
 
-  // ── Full sync cycle ───────────────────────────────────────────
-
-  static get QUARANTINE_BACKOFF_MS() { return 30 * 60 * 1000; }
-
-  /** Returns true if the account is in the quarantine backoff window. */
-  isInQuarantineBackoff() {
-    return !!(this.account.quarantineDetectedAt &&
-      (Date.now() - this.account.quarantineDetectedAt) < AccountSync.QUARANTINE_BACKOFF_MS);
+  backoffRemainingMs() {
+    return Math.max(0, (this.account.backoffUntil || 0) - Date.now());
   }
 
-  async sync() {
-    console.log('[EAS] Starting sync for', this.account.username);
-
-    // If the device was quarantined, back off for 30 minutes before retrying.
-    // Real EAS clients (Android, iOS) do not hammer the server; they wait for
-    // admin approval. Without this, every 5-minute alarm cycle triggers a new
-    // Provision request and Exchange generates a fresh quarantine notification email.
-    if (this.isInQuarantineBackoff()) {
-      // Caller (SyncManager.syncAll) should check isInQuarantineBackoff() first and
-      // skip entirely, but guard here too in case sync() is called directly.
-      throw new Error('DEVICE_QUARANTINED');
-    }
-
-    if (this.account.quarantineDetectedAt) {
-      // Backoff expired – try again; admin may have approved the device
-      console.log('[EAS] Quarantine backoff expired – retrying sync');
-    }
-
-    // Re-send device metadata on every sync until Exchange confirms it by completing
-    // a successful FolderSync. Exchange does not store Settings for quarantined devices,
-    // so we must re-send after admin approval to populate OWA device details.
-    if (!this.account.settingsConfirmed) {
-      try {
-        const profile = resolveProfile(this.account);
-        await this.client.request('Settings', buildSettings(profile, { email: this.account.email || this.account.username }));
-      } catch (e) { /* non-fatal */ }
-    }
-
-    try {
-      await this._syncFolders();
-      // First successful FolderSync after quarantine – clear the backoff state
-      if (this.account.quarantineDetectedAt) {
-        this.account.quarantineDetectedAt = null;
-        await this._saveAccount();
-        console.log('[EAS] Quarantine cleared – device approved by admin');
-      }
-    } catch (e) {
-      if (e.message === 'DEVICE_QUARANTINED') {
-        // Always refresh the timestamp so the 30-minute backoff restarts from now,
-        // including after a retry following a previous backoff expiry.
-        this.account.quarantineDetectedAt = Date.now();
-        await this._saveAccount();
-        console.warn('[EAS] Device quarantined – backing off for 30 minutes');
-      }
-      throw e;
-    }
-
-    const emailFolders = Object.values(this.account.folders || {})
-      .filter(f => this._isEmailFolder(f.type));
-    console.log('[EAS] Email folders to sync:', emailFolders.map(f => f.displayName).join(', ') || '(none)');
-    for (const folder of emailFolders) {
-      try {
-        await this._syncFolder(folder);
-      } catch (e) {
-        console.error(`[EAS] Sync failed for folder ${folder.displayName}:`, e);
-      }
-    }
-    console.log('[EAS] Sync complete for', this.account.username);
+  async _enterBackoff(ms, reason, code) {
+    this.account.backoffUntil  = Date.now() + ms;
+    this.account.backoffReason = reason;
+    this.account.backoffCode   = code;
+    await this._saveAccount();
+    this.log(`backing off for ${Math.round(ms / 60000)} min: ${reason}`);
   }
 
-  // ── Folder hierarchy sync ─────────────────────────────────────
-
-  async _syncFolders() {
-    let syncKey = this.account.folderSyncKey || '0';
-    let hasMore = true;
-
-    while (hasMore) {
-      const buf    = await this.client.request('FolderSync', buildFolderSync(syncKey));
-      const result = parseFolderSync(buf);
-
-      if (result.status !== '1') {
-        if (result.status === '9' || result.status === '12') {
-          // Sync state mismatch – reset
-          syncKey = '0';
-          await this._resetFolderState();
-          continue;
-        }
-        if (result.status === '142' || result.status === '145') {
-          // DeviceNotProvisioned – run provisioning and retry
-          console.log('[EAS] FolderSync: device not provisioned, running provisioning…');
-          await this.client.provision();
-          continue;
-        }
-        if (result.status === '177') {
-          throw new Error('DEVICE_QUARANTINED');
-        }
-        throw new Error(`FolderSync status=${result.status}`);
-      }
-
-      syncKey = result.syncKey;
-      hasMore = false; // FolderSync doesn't page like Sync does
-
-      // First successful FolderSync confirms Exchange stored our Settings metadata
-      if (!this.account.settingsConfirmed) {
-        this.account.settingsConfirmed = true;
-        await this._saveAccount();
-      }
-
-      for (const folder of result.added) {
-        await this._addFolder(folder);
-      }
-      for (const { serverId } of result.deleted) {
-        await this._deleteFolder(serverId);
-      }
-      for (const folder of result.updated) {
-        await this._updateFolder(folder);
-      }
-    }
-
-    this.account.folderSyncKey = syncKey;
+  async _clearBackoff() {
+    if (!this.account.backoffUntil) return;
+    this.account.backoffUntil  = null;
+    this.account.backoffReason = null;
+    this.account.backoffCode   = null;
     await this._saveAccount();
   }
 
-  async _addFolder(easFolder) {
-    if (!this._isEmailFolder(easFolder.type)) return; // skip calendar/contacts etc.
+  // ── Setup ─────────────────────────────────────────────────────────
 
-    const folders = this.account.folders || {};
-    if (folders[easFolder.serverId]) return; // already exists
+  async initialize() {
+    this.log(`initialising against ${this.account.host} as ${this.profile.deviceType}`);
 
-    const parentTbId = easFolder.parentId && easFolder.parentId !== '0'
-      ? folders[easFolder.parentId]?.thunderbirdFolderId
-      : null;
-
-    const parent = parentTbId
-      ? await this._getFolderById(parentTbId)
-      : this.tbRootFolder;
-
-    if (!parent) {
-      console.warn(`Parent folder not found for ${easFolder.displayName}, placing at root`);
+    try {
+      const info = await this.client.options();
+      this.log(`protocol ${info.chosen}` +
+        (info.server ? ` (server ${info.server})` : '') +
+        (info.note ? ` — ${info.note}` : ''));
+      if (info.versions.length) await this._patchAccount({ serverVersions: info.versions });
+    } catch (e) {
+      if (e instanceof EasError && e.isFatalForNow) throw e;
+      this.log(`OPTIONS failed, continuing with ${this.client.easVersion}: ${e.message}`);
     }
 
-    let tbFolder;
+    // Only adopt a node that already exists. Creating one here would leave an
+    // orphan behind for every account that never gets past provisioning — and
+    // Thunderbird offers no way to delete a "none"-type account from its own
+    // UI, so the user would be stuck with it. The node is created lazily, once
+    // the server has actually handed us a folder to put in it.
+    this.tbAccount = await this._findExistingTbAccount();
+    if (this.tbAccount) {
+      this.log(`Thunderbird root ready: ${this.tbAccount.name || this.tbAccount.path || '?'}`);
+    }
+
+    await this._loadMaps();
+  }
+
+  // ── Full sync cycle ───────────────────────────────────────────────
+
+  /**
+   * Run a sync cycle.
+   *
+   * Cycles are serialised per account. The periodic alarm and the Ping push
+   * loop both call this, and two concurrent Sync requests against the same
+   * collection would race on the sync key: the server answers the second one
+   * with status 3 and the collection gets rebuilt from scratch.
+   *
+   * @param {object} [opts]
+   * @param {string[]} [opts.onlyCollections] restrict to these collection ids
+   */
+  async sync(opts = {}) {
+    const previous = this._pendingSync || Promise.resolve();
+    const next = previous.catch(() => {}).then(() => this._syncSerialised(opts));
+    this._pendingSync = next.catch(() => {});
+    return next;
+  }
+
+  async _syncSerialised(opts) {
+    if (this.isBackingOff()) {
+      throw new EasError(this.account.backoffCode || ERR.DEVICE_BLOCKED,
+        this.account.backoffReason || 'account is in backoff');
+    }
+
     try {
-      tbFolder = await messenger.folders.create(parent || this.tbRootFolder, easFolder.displayName);
+      await this._syncOnce(opts);
+      await this._clearBackoff();
     } catch (e) {
-      // Folder may already exist with that name
-      const existing = await this._findChildFolder(parent || this.tbRootFolder, easFolder.displayName);
-      tbFolder = existing;
+      if (e instanceof EasError) {
+        if (e.code === ERR.DEVICE_BLOCKED) {
+          await this._enterBackoff(BLOCKED_BACKOFF_MS, e.message, e.code);
+        } else if (e.code === ERR.THROTTLED) {
+          const wait = (e.detail?.retryAfterSec || 60) * 1000;
+          await this._enterBackoff(Math.max(wait, 60000), e.message, e.code);
+        } else if (e.code === ERR.AUTH_FAILED || e.code === ERR.PASSWORD_EXPIRED) {
+          await this._enterBackoff(BLOCKED_BACKOFF_MS, e.message, e.code);
+        }
+      }
+      throw e;
+    }
+  }
+
+  async _syncOnce(opts) {
+    await this._loadMaps();
+
+    if (this._resyncPending) {
+      this.log('server signalled X-MS-RP — discarding sync state and starting over');
+      await this._resetSyncState();
+      this._resyncPending = false;
+    }
+
+    // Register device metadata until a FolderSync confirms the server kept it.
+    // Exchange does not persist Settings for a device that is still in
+    // quarantine, so it has to be re-sent once the admin approves the device.
+    // Outlook never sends Settings at all — sending it under that fingerprint
+    // would be inconsistent with the profile.
+    if (this.profile.sendSettings !== false && !this.account.settingsConfirmed) {
+      try {
+        const { doc } = await this.client.request('Settings',
+          buildSettings(this.profile, { email: this.account.email || this.account.username }));
+        const settings = parseSettings(doc);
+        if (settings.status && settings.status !== STATUS.SUCCESS) {
+          this.log(`Settings/DeviceInformation rejected with status ${settings.status}`);
+        }
+      } catch (e) {
+        if (e instanceof EasError && e.code === ERR.DEVICE_BLOCKED) throw e;
+        this.log(`Settings/DeviceInformation failed (non-fatal): ${e.message}`);
+      }
+    }
+
+    await this._syncFolders();
+
+    if (!this.account.settingsConfirmed) {
+      await this._patchAccount({ settingsConfirmed: true });
+    }
+
+    const folders = this._mailFolders()
+      .filter(f => !opts.onlyCollections || opts.onlyCollections.includes(f.serverId));
+
+    this.log(`syncing ${folders.length} folder(s): ${folders.map(f => f.displayName).join(', ') || '(none)'}`);
+
+    for (const folder of folders) {
+      try {
+        await this._syncFolder(folder);
+      } catch (e) {
+        // A device-level refusal is not folder-specific — stop the cycle.
+        if (e instanceof EasError && e.isFatalForNow) throw e;
+        this.log(`folder "${folder.displayName}" failed: ${e.message}`);
+      }
+    }
+
+    await this._flushMaps();
+    await this._saveAccount();
+  }
+
+  _mailFolders() {
+    return Object.values(this.account.folders || {})
+      .filter(f => MAIL_FOLDER_TYPES.has(f.type) && f.thunderbirdFolderId);
+  }
+
+  // ── Folder hierarchy ──────────────────────────────────────────────
+
+  async _syncFolders() {
+    let syncKey = this.account.folderSyncKey || '0';
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { doc } = await this.client.request('FolderSync', buildFolderSync(syncKey));
+      const result  = parseFolderSync(doc);
+
+      if (result.status !== STATUS.SUCCESS) {
+        if (SYNC_KEY_INVALID_STATUS.has(result.status)) {
+          this.log(`FolderSync status ${result.status} — rebuilding the hierarchy from scratch`);
+          syncKey = '0';
+          await this._resetSyncState();
+          continue;
+        }
+        throw new EasError(ERR.SERVER_ERROR, `FolderSync returned status ${result.status}`,
+          { status: result.status });
+      }
+
+      await this._applyFolderChanges(result);
+      await this._patchAccount({ folderSyncKey: result.syncKey });
+      return;
+    }
+
+    throw new EasError(ERR.SERVER_ERROR, 'FolderSync did not converge after three attempts');
+  }
+
+  async _applyFolderChanges(result) {
+    for (const { serverId } of result.deleted) await this._deleteFolder(serverId);
+
+    // Parents must exist before children. The server usually lists them in
+    // order, but nothing guarantees it, so sort by depth first.
+    for (const folder of this._sortByHierarchy(result.added)) await this._addFolder(folder);
+    for (const folder of result.updated) await this._updateFolder(folder);
+  }
+
+  _sortByHierarchy(folders) {
+    const byId = new Map(folders.map(f => [f.serverId, f]));
+    const depth = (folder, seen = new Set()) => {
+      let d = 0;
+      let cur = folder;
+      while (cur?.parentId && cur.parentId !== '0' && !seen.has(cur.serverId)) {
+        seen.add(cur.serverId);
+        cur = byId.get(cur.parentId);
+        if (!cur) break;
+        d++;
+      }
+      return d;
+    };
+    return [...folders].sort((a, b) => depth(a) - depth(b));
+  }
+
+  async _addFolder(easFolder) {
+    if (!MAIL_FOLDER_TYPES.has(easFolder.type)) return;   // calendar, contacts, tasks
+
+    const folders = this.account.folders || {};
+    if (folders[easFolder.serverId]?.thunderbirdFolderId) return;
+
+    const parentInfo = easFolder.parentId && easFolder.parentId !== '0'
+      ? folders[easFolder.parentId]
+      : null;
+    const parent = parentInfo?.thunderbirdFolderId
+      ? await this._getFolderById(parentInfo.thunderbirdFolderId)
+      : null;
+
+    // First folder from the server is what justifies creating the account node.
+    if (!parent && !this.tbAccount) this.tbAccount = await this._ensureTbAccount();
+
+    const container = parent || this.tbAccount;
+    if (!container) {
+      this.log(`no place to create "${easFolder.displayName}" — skipping`);
+      return;
+    }
+
+    let tbFolder = await this._findChildFolder(container, easFolder.displayName);
+    if (!tbFolder) {
+      try {
+        tbFolder = await messenger.folders.create(container, easFolder.displayName);
+      } catch (e) {
+        this.log(`could not create folder "${easFolder.displayName}": ${e.message}`);
+        tbFolder = await this._findChildFolder(container, easFolder.displayName);
+      }
     }
 
     folders[easFolder.serverId] = {
       serverId:            easFolder.serverId,
+      parentId:            easFolder.parentId,
       displayName:         easFolder.displayName,
       type:                easFolder.type,
       thunderbirdFolderId: tbFolder?.id || null,
       syncKey:             '0',
     };
-
     this.account.folders = folders;
+
+    await this._tagSpecialFolder(easFolder.type, tbFolder);
     await this._saveAccount();
+  }
+
+  /**
+   * Give Inbox/Sent/Drafts/Trash their real Thunderbird identity. Without the
+   * folder flags they are ordinary folders: generic icons, no delete-to-trash,
+   * sent mail filed somewhere else.
+   */
+  async _tagSpecialFolder(easType, tbFolder) {
+    const role = FOLDER_ROLE[easType];
+    if (!role || !tbFolder || !this.account.tbAccountKey) return;
+    if (typeof messenger.easAccount === 'undefined') return;
+    try {
+      await messenger.easAccount.setSpecialFolder(this.account.tbAccountKey, tbFolder.path, role);
+    } catch (e) {
+      this.log(`could not tag "${tbFolder.path}" as ${role}: ${e.message}`);
+    }
   }
 
   async _deleteFolder(serverId) {
@@ -231,328 +350,556 @@ export class AccountSync {
         const tbFolder = await this._getFolderById(info.thunderbirdFolderId);
         if (tbFolder) await messenger.folders.delete(tbFolder);
       } catch (e) {
-        console.warn('Could not delete TB folder:', e);
+        this.log(`could not delete Thunderbird folder for "${info.displayName}": ${e.message}`);
       }
     }
 
     delete folders[serverId];
     this.account.folders = folders;
+    await this._dropFolderMap(serverId);
     await this._saveAccount();
   }
 
   async _updateFolder(easFolder) {
-    const folders = this.account.folders || {};
-    const info = folders[easFolder.serverId];
-    if (info) {
-      info.displayName = easFolder.displayName;
-      info.type        = easFolder.type;
-      // Rename TB folder if needed
-      if (info.thunderbirdFolderId) {
-        try {
-          const tbFolder = await this._getFolderById(info.thunderbirdFolderId);
-          if (tbFolder && tbFolder.name !== easFolder.displayName) {
-            await messenger.folders.rename(tbFolder, easFolder.displayName);
-          }
-        } catch (e) { /* non-fatal */ }
+    const info = this.account.folders?.[easFolder.serverId];
+    if (!info) return await this._addFolder(easFolder);
+
+    const renamed = info.displayName !== easFolder.displayName;
+    info.displayName = easFolder.displayName;
+    info.type        = easFolder.type;
+    info.parentId    = easFolder.parentId;
+
+    if (renamed && info.thunderbirdFolderId) {
+      try {
+        const tbFolder = await this._getFolderById(info.thunderbirdFolderId);
+        if (tbFolder && tbFolder.name !== easFolder.displayName) {
+          await messenger.folders.rename(tbFolder, easFolder.displayName);
+        }
+      } catch (e) {
+        this.log(`could not rename folder: ${e.message}`);
       }
     }
     await this._saveAccount();
   }
 
-  // ── Email item sync ───────────────────────────────────────────
+  // ── Message sync ──────────────────────────────────────────────────
 
   async _syncFolder(folderInfo) {
-    let syncKey   = folderInfo.syncKey || '0';
-    let hasMore   = true;
     const tbFolder = await this._getFolderById(folderInfo.thunderbirdFolderId);
     if (!tbFolder) {
-      console.warn(`TB folder not found for ${folderInfo.displayName}`);
+      this.log(`Thunderbird folder missing for "${folderInfo.displayName}" — skipping`);
       return;
     }
 
-    while (hasMore) {
-      const buf    = await this.client.request('Sync',
-        buildSync(syncKey, folderInfo.serverId, { windowSize: 50 }));
-      const result = parseSync(buf);
+    let syncKey = folderInfo.syncKey || '0';
+    let pages   = 0;
+    let primed  = syncKey !== '0';
 
-      if (!result) {
-        // HTTP 200 with empty body = no changes
+    for (;;) {
+      if (++pages > MAX_SYNC_PAGES) {
+        this.log(`"${folderInfo.displayName}": stopping after ${MAX_SYNC_PAGES} pages`);
         break;
       }
 
-      if (result.status === '3' || result.status === '12') {
-        // Sync state out of date – start over
-        syncKey = '0';
-        folderInfo.syncKey = '0';
-        continue;
+      const request = buildSync({
+        syncKey,
+        collectionId:   folderInfo.serverId,
+        easVersion:     this.client.easVersion,
+        windowSize:     this.profile.windowSize || 100,
+        getChanges:     syncKey === '0' ? undefined : true,
+        filterType:     this.account.filterType ?? FILTER_TYPE.ALL,
+        truncationSize: this.account.truncationSize ?? DEFAULT_TRUNCATION_SIZE,
+      });
+
+      const { doc } = await this.client.request('Sync', request);
+      const parsed  = parseSync(doc);
+
+      // Empty body = "nothing changed since your last request".
+      if (!parsed) break;
+
+      if (parsed.status && parsed.status !== STATUS.SUCCESS) {
+        if (SYNC_KEY_INVALID_STATUS.has(parsed.status)) {
+          this.log(`"${folderInfo.displayName}": top-level status ${parsed.status} — resetting collection`);
+          syncKey = '0';
+          primed  = false;
+          folderInfo.syncKey = '0';
+          await this._dropFolderMap(folderInfo.serverId);
+          continue;
+        }
+        throw new EasError(ERR.SERVER_ERROR,
+          `Sync of "${folderInfo.displayName}" returned top-level status ${parsed.status}`,
+          { status: parsed.status });
       }
 
-      syncKey  = result.syncKey;
-      hasMore  = result.moreAvailable;
+      const collection = parsed.collections.find(c => c.collectionId === folderInfo.serverId)
+        || parsed.collections[0];
+      if (!collection) break;
 
-      for (const item of result.added) {
-        await this._importMessage(item, tbFolder, folderInfo);
+      if (collection.status !== STATUS.SUCCESS) {
+        if (SYNC_KEY_INVALID_STATUS.has(collection.status)) {
+          this.log(`"${folderInfo.displayName}": status ${collection.status} — resetting collection`);
+          syncKey = '0';
+          primed  = false;
+          folderInfo.syncKey = '0';
+          await this._dropFolderMap(folderInfo.serverId);
+          continue;
+        }
+        throw new EasError(ERR.SERVER_ERROR,
+          `Sync of "${folderInfo.displayName}" returned status ${collection.status}`,
+          { status: collection.status });
       }
 
-      for (const item of result.changed) {
-        // Update read state in Thunderbird if we know the message
-        await this._updateMessage(item, folderInfo);
-      }
+      syncKey = collection.syncKey;
+      folderInfo.syncKey = syncKey;
 
-      for (const item of result.deleted) {
-        await this._deleteMessage(item, folderInfo);
-      }
+      for (const item of collection.added)   await this._importMessage(item, tbFolder, folderInfo);
+      for (const item of collection.changed) await this._updateMessage(item, folderInfo);
+      for (const item of collection.deleted) await this._deleteMessage(item, folderInfo);
+
+      // The priming answer carries the new key and nothing else — keep going
+      // rather than mistaking it for an empty mailbox.
+      if (!primed) { primed = true; continue; }
+      if (!collection.moreAvailable) break;
     }
 
-    folderInfo.syncKey = syncKey;
     await this._saveAccount();
   }
 
   async _importMessage(item, tbFolder, folderInfo) {
-    if (!item.mime || !item.mime.trim()) return;
-
-    // If the Sync response flagged the body as truncated, fetch the full MIME via
-    // ItemOperations/Fetch before importing (no TruncationSize = server sends everything).
     let mime = item.mime;
+
     if (item.truncated) {
       try {
-        const buf    = await this.client.request('ItemOperations',
+        const { doc } = await this.client.request('ItemOperations',
           buildItemOperationsFetch(folderInfo.serverId, item.serverId));
-        const result = parseItemOperationsFetch(buf);
-        if (result.mime) mime = result.mime;
-        console.log('[EAS] Fetched full MIME for truncated item:', item.serverId);
+        const full = parseItemOperationsFetch(doc);
+        if (full.mime) mime = full.mime;
       } catch (e) {
-        console.warn('[EAS] ItemOperations/Fetch failed, using truncated MIME:', e.message);
+        this.log(`full fetch for ${item.serverId} failed, importing truncated body: ${e.message}`);
       }
     }
 
-    // Track server ID → TB message (stored in mime header or mapping)
-    const mimeWithHeader = this._injectEasHeader(mime, item.serverId, this.account.id);
+    if (!mime || !mime.trim()) {
+      this.log(`item ${item.serverId} carried no MIME body — skipped`);
+      return;
+    }
 
-    const blob = new Blob([mimeWithHeader], { type: 'message/rfc822' });
-    const file = new File([blob], 'message.eml', { type: 'message/rfc822' });
+    const withHeaders = this._injectEasHeaders(mime, item.serverId);
+    const file = new File(
+      [new Blob([withHeaders], { type: 'message/rfc822' })],
+      'message.eml',
+      { type: 'message/rfc822' }
+    );
 
     try {
       const msg = await messenger.messages.import(file, tbFolder, {
-        read: item.read,
+        read:    item.read,
         flagged: false,
       });
-      // Store mapping: easServerId → tbMessageId
-      await this._storeMapping(folderInfo.serverId, item.serverId, msg.id);
+      this._setMapping(folderInfo.serverId, item.serverId, msg.id);
     } catch (e) {
-      console.error('Failed to import message:', item.serverId, e);
+      this.log(`import of ${item.serverId} failed: ${e.message}`);
     }
   }
 
   async _updateMessage(item, folderInfo) {
-    const tbId = await this._getTbMessageId(folderInfo.serverId, item.serverId);
+    const tbId = this._getMapping(folderInfo.serverId, item.serverId);
     if (!tbId) return;
+    if (!item.hasReadFlag) return;
     try {
       await messenger.messages.update(tbId, { read: item.read });
-    } catch (e) { /* message may have been deleted locally */ }
+    } catch (_) { /* message gone locally */ }
   }
 
   async _deleteMessage(item, folderInfo) {
-    const tbId = await this._getTbMessageId(folderInfo.serverId, item.serverId);
+    const tbId = this._getMapping(folderInfo.serverId, item.serverId);
     if (!tbId) return;
     try {
-      await messenger.messages.delete([tbId], true); // skipTrash=true
-    } catch (e) { /* already gone */ }
-    await this._removeMapping(folderInfo.serverId, item.serverId);
+      await messenger.messages.delete([tbId], true);   // skipTrash: already in the EAS trash
+    } catch (_) { /* already gone */ }
+    this._removeMapping(folderInfo.serverId, item.serverId);
   }
 
-  // ── Send outgoing email via EAS ───────────────────────────────
+  // ── Outgoing changes ──────────────────────────────────────────────
 
-  /**
-   * Called from compose.onBeforeSend when From matches this account.
-   * @param {string} mimeData  raw RFC-2822 message
-   */
   async sendMail(mimeData) {
-    await this.client.sendRawMime(mimeData);
+    await this.client.sendMail(mimeData, { saveInSent: true });
   }
 
-  // ── Mark-as-read propagation back to server ────────────────────
+  /** Push a local read/unread change back to the server. */
+  async propagateReadFlag(tbMessageId, read) {
+    const mapping = this._getReverseMapping(tbMessageId);
+    if (!mapping) return false;
 
-  async propagateReadFlag(_tbFolderId, tbMessageId, read) {
-    const mapping = await this._getMappingByTbId(tbMessageId);
-    if (!mapping) return;
     const folderInfo = this.account.folders?.[mapping.easFolderId];
-    if (!folderInfo) return;
+    if (!folderInfo || folderInfo.syncKey === '0') return false;
 
-    const buf = await this.client.request('Sync',
-      buildSync(folderInfo.syncKey, folderInfo.serverId, {
-        getChanges: false,
-        readChanges: [{ serverId: mapping.easServerId, read }],
-      })
-    );
-    // Parse response to get updated syncKey
-    const result = parseSync(buf);
-    if (result) folderInfo.syncKey = result.syncKey;
-    await this._saveAccount();
+    const { doc } = await this.client.request('Sync', buildSync({
+      syncKey:      folderInfo.syncKey,
+      collectionId: folderInfo.serverId,
+      easVersion:   this.client.easVersion,
+      // Suppress the server's own changes: this request exists to push one
+      // flag, and any items returned here would be acknowledged by the new
+      // sync key without ever being imported.
+      getChanges:   false,
+      readChanges:  [{ serverId: mapping.easServerId, read }],
+    }));
+
+    const parsed = parseSync(doc);
+    const collection = parsed?.collections?.find(c => c.collectionId === folderInfo.serverId)
+      || parsed?.collections?.[0];
+    if (collection?.syncKey) {
+      folderInfo.syncKey = collection.syncKey;
+      await this._saveAccount();
+    }
+
+    const failed = collection?.responses?.find(r => r.status && r.status !== STATUS.SUCCESS);
+    if (failed) this.log(`read-flag change rejected with status ${failed.status}`);
+    return !failed;
   }
 
-  // ── Thunderbird account node helpers ─────────────────────────
+  /** Push a local deletion back to the server. */
+  async propagateDelete(tbMessageId) {
+    const mapping = this._getReverseMapping(tbMessageId);
+    if (!mapping) return false;
+
+    const folderInfo = this.account.folders?.[mapping.easFolderId];
+    if (!folderInfo || folderInfo.syncKey === '0') return false;
+
+    const { doc } = await this.client.request('Sync', buildSync({
+      syncKey:      folderInfo.syncKey,
+      collectionId: folderInfo.serverId,
+      easVersion:   this.client.easVersion,
+      getChanges:   false,
+      deleteIds:    [mapping.easServerId],
+    }));
+
+    const parsed = parseSync(doc);
+    const collection = parsed?.collections?.[0];
+    if (collection?.syncKey) {
+      folderInfo.syncKey = collection.syncKey;
+      this._removeMapping(mapping.easFolderId, mapping.easServerId);
+      await this._flushMaps();
+      await this._saveAccount();
+    }
+    return true;
+  }
+
+  // ── Push (Ping) ───────────────────────────────────────────────────
 
   /**
-   * Ensure a dedicated top-level Thunderbird account node exists for this
-   * EAS account. Uses the Experiments API (easAccount) to create an XPCOM
-   * account via MailServices so it appears identically to IMAP accounts.
+   * Long-poll the server for changes.
    *
-   * The account key is persisted in account.tbAccountKey across restarts.
+   * Heartbeat handling is adaptive on purpose: intermediate proxies and NAT
+   * gateways frequently kill idle connections long before the negotiated
+   * heartbeat elapses, which looks exactly like a network error. Starting
+   * conservatively, halving on a network failure and growing slowly after a
+   * clean heartbeat converges on whatever the path actually tolerates.
    */
+  async startPushLoop() {
+    if (this.pushing) return;
+    if (!this._mailFolders().length) return;
+
+    this.pushing   = true;
+    this.pushAbort = new AbortController();
+    const signal   = this.pushAbort.signal;
+
+    let heartbeat = this.account.heartbeatSec || HEARTBEAT.INITIAL;
+    let maxFolders = this.account.maxPingFolders || null;
+
+    this.log(`push loop started (heartbeat ${heartbeat}s)`);
+
+    while (this.pushing && !signal.aborted) {
+      if (this.isBackingOff()) { await this._sleep(60000, signal); continue; }
+
+      let folders = this._mailFolders().map(f => ({ id: f.serverId, class: 'Email' }));
+      if (!folders.length) break;
+      if (maxFolders && folders.length > maxFolders) folders = folders.slice(0, maxFolders);
+
+      try {
+        const result = await this.client.ping(heartbeat, folders, signal);
+
+        switch (result.status) {
+          case PING_STATUS.EXPIRED:
+            heartbeat = Math.min(HEARTBEAT.MAX, heartbeat + HEARTBEAT.STEP_UP);
+            await this._patchAccount({ heartbeatSec: heartbeat });
+            break;
+
+          case PING_STATUS.CHANGES:
+            this.log(`push: changes in ${result.changedFolders.length} folder(s)`);
+            await this.sync({ onlyCollections: result.changedFolders });
+            break;
+
+          case PING_STATUS.INVALID_HEARTBEAT:
+            if (result.heartbeatLimit) {
+              this.log(`push: server requires heartbeat ${result.heartbeatLimit}s`);
+              heartbeat = result.heartbeatLimit;
+              await this._patchAccount({ heartbeatSec: heartbeat });
+            } else {
+              heartbeat = Math.max(HEARTBEAT.MIN, Math.floor(heartbeat / 2));
+            }
+            break;
+
+          case PING_STATUS.TOO_MANY_FOLDERS:
+            maxFolders = result.folderLimit || Math.max(1, folders.length - 1);
+            this.log(`push: server allows at most ${maxFolders} folders`);
+            await this._patchAccount({ maxPingFolders: maxFolders });
+            break;
+
+          case PING_STATUS.HIERARCHY_STALE:
+            await this._syncFolders();
+            break;
+
+          case PING_STATUS.MISSING_PARAMETERS:
+          case PING_STATUS.SYNTAX_ERROR:
+            this.log(`push: server rejected the Ping request (status ${result.status}) — stopping push`);
+            this.pushing = false;
+            break;
+
+          default:
+            await this._sleep(60000, signal);
+        }
+      } catch (e) {
+        if (signal.aborted) break;
+
+        if (e instanceof EasError && e.isFatalForNow) {
+          this.log(`push loop stopping: ${e.message}`);
+          if (e.code === ERR.DEVICE_BLOCKED) await this._enterBackoff(BLOCKED_BACKOFF_MS, e.message, e.code);
+          this.pushing = false;
+          break;
+        }
+
+        if (e instanceof EasError && e.code === ERR.NETWORK) {
+          // Most likely the connection was cut mid-heartbeat.
+          heartbeat = Math.max(HEARTBEAT.MIN, Math.floor(heartbeat / 2));
+          await this._patchAccount({ heartbeatSec: heartbeat });
+          this.log(`push: connection dropped, heartbeat reduced to ${heartbeat}s`);
+          await this._sleep(5000, signal);
+          continue;
+        }
+
+        this.log(`push error: ${e.message}`);
+        await this._sleep(30000, signal);
+      }
+    }
+
+    this.pushing = false;
+    this.log('push loop stopped');
+  }
+
+  stopPushLoop() {
+    this.pushing = false;
+    this.pushAbort?.abort();
+    this.pushAbort = null;
+  }
+
+  _sleep(ms, signal) {
+    return new Promise(resolve => {
+      const timer = setTimeout(resolve, ms);
+      signal?.addEventListener('abort', () => { clearTimeout(timer); resolve(); }, { once: true });
+    });
+  }
+
+  // ── Thunderbird account node ──────────────────────────────────────
+
+  /**
+   * Give the account its own top-level node in the folder pane when the
+   * privileged build is installed, and fall back to a folder inside Local
+   * Folders otherwise. Both paths produce something usable, so the same code
+   * runs on both builds and account data survives switching between them.
+   */
+  /** Adopt an already-created node, without creating one. */
+  async _findExistingTbAccount() {
+    if (typeof messenger.easAccount !== 'undefined') {
+      if (!this.account.tbAccountKey) return null;
+      return await this._getAccount(this.account.tbAccountKey);
+    }
+
+    const rootName = this.account.email || this.account.username;
+    const local = await this._localFoldersAccount();
+    return local ? await this._findChildFolder(local, rootName) : null;
+  }
+
   async _ensureTbAccount() {
     const email = this.account.email || this.account.username;
 
-    // ── Path A: Experiments API available → dedicated account node ───
     if (typeof messenger.easAccount !== 'undefined') {
-      // Re-use existing account node if we already created one
-      if (this.account.tbAccountKey) {
-        try {
-          const tbAccount = await messenger.accounts.get(this.account.tbAccountKey);
-          if (tbAccount) {
-            console.log('[EAS] Re-using TB account node:', tbAccount.name);
-            return tbAccount;
-          }
-        } catch (_) { /* account gone, will recreate */ }
-      }
+      const existing = await this._findExistingTbAccount();
+      if (existing) return existing;
 
-      console.log('[EAS] Creating TB account node for:', email);
-      const accountKey = await messenger.easAccount.createAccount(email, this.account.host);
-      this.account.tbAccountKey = accountKey;
-      await this._saveAccount();
-      const tbAccount = await messenger.accounts.get(accountKey);
-      console.log('[EAS] TB account node created:', tbAccount?.name || accountKey);
-      return tbAccount;
+      const created = await messenger.easAccount.createAccount(email, this.account.host, {
+        displayName: this.account.displayName || email,
+        fullName:    this.account.fullName || '',
+      });
+      // Persist the key first: without it a later removal cannot find the node.
+      await this._patchAccount({ tbAccountKey: created.accountKey });
+      this.log(`account node ${created.created ? 'created' : 'reused'}: ${created.accountKey}`);
+      if (created.identityError) {
+        this.log(`account node has no identity: ${created.identityError}`);
+      }
+      return await this._getAccount(created.accountKey);
     }
 
-    // ── Path B: Fallback – folder under Local Folders ─────────────
-    console.log('[EAS] Experiments API not available; using Local Folders fallback');
+    this.log('privileged build not active — using a folder under Local Folders');
     return this._ensureLocalFolder(email);
   }
 
-  async _ensureLocalFolder(rootName) {
+  async _localFoldersAccount() {
     const accounts = await messenger.accounts.list();
-    const local = accounts.find(a => a.type === 'none')
-               || accounts.find(a => a.type === 'local');
-    if (!local) throw new Error('No Local Folders account found in Thunderbird');
-
-    for (const folder of local.folders || []) {
-      if (folder.name === rootName) {
-        console.log('[EAS] Reusing local folder:', folder.path);
-        return folder;
-      }
-    }
-
-    console.log('[EAS] Creating local folder:', rootName);
-    const folder = await messenger.folders.create(local, rootName);
-    console.log('[EAS] Local folder created:', folder?.path);
-    return folder;
+    return accounts.find(a => a.type === 'none') || accounts.find(a => a.type === 'local') || null;
   }
 
-  async _findChildFolder(parent, name) {
-    const subs = parent.subFolders || [];
-    return subs.find(f => f.name === name) || null;
+  async _getAccount(key) {
+    try {
+      return await messenger.accounts.get(key);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  async _ensureLocalFolder(rootName) {
+    const local = await this._localFoldersAccount();
+    if (!local) throw new Error('No Local Folders account found in Thunderbird');
+
+    const existing = await this._findChildFolder(local, rootName);
+    if (existing) return existing;
+
+    return await messenger.folders.create(local, rootName);
+  }
+
+  /**
+   * Look for an existing child folder by name.
+   *
+   * The sub-folder list carried on a cached MailAccount/MailFolder object goes
+   * stale as soon as we create something, so the live list is queried first
+   * and the cached arrays are only a fallback.
+   */
+  async _findChildFolder(container, name) {
+    try {
+      const children = await messenger.folders.getSubFolders(container, false);
+      const hit = (children || []).find(f => f.name === name);
+      if (hit) return hit;
+    } catch (_) { /* older API shape, fall through */ }
+
+    const cached = container.subFolders || container.folders || [];
+    return cached.find(f => f.name === name) || null;
   }
 
   async _getFolderById(folderId) {
     if (!folderId) return null;
     try {
       return await messenger.folders.get(folderId);
-    } catch (e) {
+    } catch (_) {
       return null;
     }
   }
 
-  // ── Mapping storage: EAS ServerId ↔ Thunderbird messageId ────
+  // ── ServerId ↔ Thunderbird message id ─────────────────────────────
+  //
+  // Held in memory for the duration of a cycle and written once at the end.
+  // The previous implementation did a read-modify-write of two storage keys
+  // per imported message, which makes the initial sync of a large folder
+  // quadratic in storage operations.
 
-  _mappingKey(easFolderId) {
-    return `mapping_${this.account.id}_${easFolderId}`;
+  _mapKey(easFolderId) { return `mapping_${this.account.id}_${easFolderId}`; }
+  get _revKey() { return `rev_mapping_${this.account.id}`; }
+
+  async _loadMaps() {
+    if (this._maps) return;
+    this._maps = {};
+    for (const folderId of Object.keys(this.account.folders || {})) {
+      const key  = this._mapKey(folderId);
+      const data = await messenger.storage.local.get(key);
+      this._maps[folderId] = data[key] || {};
+    }
+    const rev = await messenger.storage.local.get(this._revKey);
+    this._revMap = rev[this._revKey] || {};
   }
 
-  async _storeMapping(easFolderId, easServerId, tbMessageId) {
-    const key  = this._mappingKey(easFolderId);
-    const data = await messenger.storage.local.get(key);
-    const map  = data[key] || {};
-    map[easServerId] = tbMessageId;
-    await messenger.storage.local.set({ [key]: map });
-
-    // Also store reverse mapping
-    const revKey = `rev_mapping_${this.account.id}`;
-    const revData = await messenger.storage.local.get(revKey);
-    const rev = revData[revKey] || {};
-    rev[tbMessageId] = { easFolderId, easServerId };
-    await messenger.storage.local.set({ [revKey]: rev });
+  _setMapping(easFolderId, easServerId, tbMessageId) {
+    if (!this._maps) { this._maps = {}; this._revMap = {}; }
+    (this._maps[easFolderId] ||= {})[easServerId] = tbMessageId;
+    this._revMap[tbMessageId] = { easFolderId, easServerId };
+    this._mapsDirty.add(easFolderId);
   }
 
-  async _getTbMessageId(easFolderId, easServerId) {
-    const key  = this._mappingKey(easFolderId);
-    const data = await messenger.storage.local.get(key);
-    return data[key]?.[easServerId] || null;
+  _getMapping(easFolderId, easServerId) {
+    return this._maps?.[easFolderId]?.[easServerId] || null;
   }
 
-  async _removeMapping(easFolderId, easServerId) {
-    const key  = this._mappingKey(easFolderId);
-    const data = await messenger.storage.local.get(key);
-    const map  = data[key] || {};
-    const tbId = map[easServerId];
-    delete map[easServerId];
-    await messenger.storage.local.set({ [key]: map });
+  _getReverseMapping(tbMessageId) {
+    return this._revMap?.[tbMessageId] || null;
+  }
 
-    if (tbId) {
-      const revKey  = `rev_mapping_${this.account.id}`;
-      const revData = await messenger.storage.local.get(revKey);
-      const rev     = revData[revKey] || {};
-      delete rev[tbId];
-      await messenger.storage.local.set({ [revKey]: rev });
+  _removeMapping(easFolderId, easServerId) {
+    const tbId = this._maps?.[easFolderId]?.[easServerId];
+    if (tbId !== undefined) {
+      delete this._maps[easFolderId][easServerId];
+      delete this._revMap[tbId];
+      this._mapsDirty.add(easFolderId);
     }
   }
 
-  async _getMappingByTbId(tbMessageId) {
-    const revKey  = `rev_mapping_${this.account.id}`;
-    const revData = await messenger.storage.local.get(revKey);
-    return revData[revKey]?.[tbMessageId] || null;
+  async _dropFolderMap(easFolderId) {
+    await this._loadMaps();
+    for (const serverId of Object.keys(this._maps[easFolderId] || {})) {
+      const tbId = this._maps[easFolderId][serverId];
+      delete this._revMap[tbId];
+    }
+    this._maps[easFolderId] = {};
+    this._mapsDirty.add(easFolderId);
+    await this._flushMaps();
   }
 
-  // ── Persistence ──────────────────────────────────────────────
+  async _flushMaps() {
+    if (!this._maps || !this._mapsDirty.size) return;
+    const patch = { [this._revKey]: this._revMap };
+    for (const folderId of this._mapsDirty) patch[this._mapKey(folderId)] = this._maps[folderId];
+    await messenger.storage.local.set(patch);
+    this._mapsDirty.clear();
+  }
+
+  // ── Persistence ───────────────────────────────────────────────────
+
+  async _patchAccount(patch) {
+    Object.assign(this.account, patch);
+    await this._saveAccount();
+  }
 
   async _saveAccount() {
     const { accounts = [] } = await messenger.storage.local.get('accounts');
     const idx = accounts.findIndex(a => a.id === this.account.id);
-    if (idx >= 0) accounts[idx] = this.account;
-    else accounts.push(this.account);
+    // Never write the password back into storage; it lives in the password
+    // manager on the privileged build and is held in memory only.
+    const { password, ...persisted } = this.account;
+    if (idx >= 0) accounts[idx] = { ...accounts[idx], ...persisted };
+    else accounts.push(persisted);
     await messenger.storage.local.set({ accounts });
   }
 
-  async _savePolicyKey(key) {
-    this.account.policyKey = key;
-    await this._saveAccount();
-  }
-
-  async _resetFolderState() {
+  async _resetSyncState() {
     this.account.folderSyncKey = '0';
-    for (const f of Object.values(this.account.folders || {})) f.syncKey = '0';
+    for (const folder of Object.values(this.account.folders || {})) folder.syncKey = '0';
     await this._saveAccount();
   }
 
-  // ── Utilities ─────────────────────────────────────────────────
+  // ── Utilities ─────────────────────────────────────────────────────
 
-  _isEmailFolder(type) {
-    return [
-      FOLDER_TYPE.INBOX, FOLDER_TYPE.DRAFTS, FOLDER_TYPE.DELETED,
-      FOLDER_TYPE.SENT,  FOLDER_TYPE.OUTBOX, FOLDER_TYPE.USER_MAIL,
-      FOLDER_TYPE.USER_GENERIC,
-    ].includes(type);
-  }
+  /**
+   * Stamp the EAS identity onto the imported message so it can be correlated
+   * later even if the storage mapping is lost.
+   *
+   * Server-controlled values are stripped of CR/LF first — otherwise a crafted
+   * ServerId would inject arbitrary headers into the imported message.
+   */
+  _injectEasHeaders(mime, serverId) {
+    const clean = v => String(v).replace(/[\r\n]/g, '');
+    const headers =
+      `X-EAS-ServerId: ${clean(serverId)}\r\n` +
+      `X-EAS-AccountId: ${clean(this.account.id)}\r\n`;
 
-  /** Inject X-EAS-ServerId header so we can correlate later */
-  _injectEasHeader(mime, serverId, accountId) {
-    // Sanitize server-controlled values to prevent MIME header injection
-    const safeServerId  = String(serverId).replace(/[\r\n]/g, '');
-    const safeAccountId = String(accountId).replace(/[\r\n]/g, '');
-    const header = `X-EAS-ServerId: ${safeServerId}\r\nX-EAS-AccountId: ${safeAccountId}\r\n`;
-    // Insert after first line (Return-Path or first real header)
-    const pos = mime.indexOf('\r\n');
-    if (pos < 0) return header + mime;
-    return mime.slice(0, pos + 2) + header + mime.slice(pos + 2);
+    const firstBreak = mime.indexOf('\r\n');
+    if (firstBreak < 0) return headers + mime;
+    return mime.slice(0, firstBreak + 2) + headers + mime.slice(firstBreak + 2);
   }
 }
