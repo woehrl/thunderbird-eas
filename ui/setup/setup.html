@@ -97,8 +97,11 @@
     <h2>Leftover account nodes</h2>
     <p class="hint" style="margin-bottom:12px">
       These folder-pane nodes were created by this add-on but no configured account claims them —
-      typically from a setup that failed part way, or from reinstalling the add-on. Thunderbird
-      offers no Delete button for this kind of account, so remove them here.
+      typically from a setup that failed part way, or from removing and reinstalling the add-on,
+      which wipes the extension's own storage while the node survives. Thunderbird offers no
+      Delete button for this kind of account, so handle them here.<br>
+      <b>Restore</b> re-adopts a node together with its original DeviceId, so the server keeps
+      seeing the same device — no new partnership, no fresh quarantine.
       <b>Deleting a node also deletes the mail stored in it.</b>
     </p>
     <ul class="account-list" id="orphan-list"></ul>
@@ -200,6 +203,19 @@
 
     <details class="advanced">
       <summary>Advanced</summary>
+
+      <div class="field">
+        <label for="device-id">Device ID</label>
+        <input type="text" id="device-id" placeholder="leave empty to generate a new one"
+               maxlength="32" spellcheck="false">
+        <div class="hint">
+          Reuse an existing ID to re-attach to a device partnership the server already knows —
+          after reinstalling the add-on, or when moving to another profile. Avoids consuming
+          another slot of the mailbox device quota and starting a fresh quarantine.
+          You will find it in the server's quarantine notification mail and in the OWA device list.
+          32 characters, letters and digits only.
+        </div>
+      </div>
 
       <div class="field">
         <label for="mailbox-address">Mailbox address</label>

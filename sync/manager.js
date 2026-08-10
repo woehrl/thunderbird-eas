@@ -11,7 +11,7 @@ import { AccountSync } from './email-sync.js';
 import { EasClient, EasError, ERR } from '../eas/client.js';
 import {
   DEVICE_PROFILES, DEFAULT_PROFILE_ID, resolveProfile,
-  generateDeviceId, verifyCodePages,
+  generateDeviceId, isValidDeviceId, verifyCodePages,
 } from '../eas/protocol.js';
 import { discover, probeEws } from '../eas/autodiscover.js';
 import { FILTER_TYPE } from '../eas/commands.js';
@@ -375,6 +375,7 @@ export class SyncManager {
       case 'PROBE_EWS':        return this._uiProbeEws(msg.account);
       case 'LIST_TB_ACCOUNTS': return this._uiListTbAccounts();
       case 'REMOVE_TB_ACCOUNT':return this._uiRemoveTbAccount(msg.accountKey);
+      case 'RESTORE_TB_ACCOUNT':return this._uiRestoreTbAccount(msg.accountKey);
       case 'GET_LOG':          return Promise.resolve(this.logs.get(msg.accountId) || []);
       default:                 return Promise.resolve(null);
     }
@@ -540,8 +541,9 @@ export class SyncManager {
       // A stable DeviceId is the single most important piece of client state:
       // Exchange treats a changed DeviceId as a brand new device, which starts
       // a fresh quarantine cycle and consumes another slot of the mailbox
-      // device quota. Generated once, never regenerated.
-      deviceId:        generateDeviceId(),
+      // device quota. Generated once, never regenerated — and reusable, so an
+      // existing partnership can be re-attached instead of duplicated.
+      deviceId:        isValidDeviceId(data.deviceId) ? data.deviceId : generateDeviceId(),
       deviceProfileId: data.deviceProfileId || DEFAULT_PROFILE_ID,
       customProfile:   data.customProfile || null,
       authEncoding:    data.authEncoding || 'utf-8',
@@ -652,8 +654,63 @@ export class SyncManager {
 
     return {
       supported: true,
-      accounts: nodes.map(node => ({ ...node, orphaned: !claimed.has(node.accountKey) })),
+      accounts: nodes.map(node => {
+        const restorable = parseAccountData(node.accountData);
+        return {
+          accountKey:    node.accountKey,
+          name:          node.name,
+          hostname:      node.hostname,
+          identityCount: node.identityCount,
+          markedManaged: node.markedManaged,
+          orphaned:      !claimed.has(node.accountKey),
+          // Only advertise a restore when the mirrored copy is actually usable.
+          restorable:    restorable
+            ? { host: restorable.host, username: restorable.username, deviceId: restorable.deviceId }
+            : null,
+        };
+      }),
     };
+  }
+
+  /**
+   * Re-adopt an account node whose extension-side configuration was lost —
+   * typically because the add-on was removed, which wipes storage.local while
+   * the account node survives in the mail profile.
+   *
+   * This restores the original DeviceId, which is the whole point: a fresh one
+   * would register as a new device on the server, consume another slot of the
+   * mailbox quota and start the quarantine cycle over.
+   */
+  async _uiRestoreTbAccount(accountKey) {
+    if (typeof messenger.easAccount === 'undefined') {
+      return { success: false, error: 'privileged build not active' };
+    }
+
+    const nodes = await messenger.easAccount.listAccounts();
+    const node = nodes.find(n => n.accountKey === accountKey);
+    if (!node) return { success: false, error: 'account node not found' };
+
+    const restored = parseAccountData(node.accountData);
+    if (!restored) return { success: false, error: 'this node carries no recoverable configuration' };
+
+    const { accounts = [] } = await messenger.storage.local.get('accounts');
+    if (accounts.some(a => a.id === restored.id)) {
+      return { success: false, error: 'this account is already configured' };
+    }
+
+    restored.tbAccountKey = accountKey;
+    // Folder ids and sync keys are kept: the partnership on the server is the
+    // same one, so its sync keys are still valid and a reset would re-download
+    // everything the folders already contain.
+    accounts.push(restored);
+    await messenger.storage.local.set({ accounts });
+
+    await this._addAccount(restored);
+
+    const sync = this.syncs.get(restored.id);
+    if (sync) this._syncAccount(restored.id, sync);
+
+    return { success: true, accountId: restored.id, username: restored.username };
   }
 
   async _uiRemoveTbAccount(accountKey) {
@@ -784,6 +841,20 @@ function base64Lines(arrayBuffer) {
   }
   const b64 = btoa(binary);
   return b64.match(/.{1,76}/g)?.join('\r\n') ?? b64;
+}
+
+/**
+ * Parse a mirrored account blob, accepting it only if it carries the fields a
+ * working account needs. Server-side preference content is untrusted input.
+ */
+function parseAccountData(raw) {
+  if (!raw) return null;
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!parsed || typeof parsed !== 'object') return null;
+  if (!parsed.id || !parsed.host || !parsed.username || !parsed.deviceId) return null;
+  delete parsed.password;
+  return parsed;
 }
 
 function sanitizeParam(value) {

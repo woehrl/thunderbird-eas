@@ -182,16 +182,29 @@ async function loadOrphans() {
   for (const node of orphans) {
     const item = document.createElement('li');
     item.className = 'account-item';
+
+    const meta = node.restorable
+      ? `${escHtml(node.restorable.username)} · ${escHtml(node.restorable.host)}` +
+        ` · device ${escHtml(node.restorable.deviceId)}`
+      : `${escHtml(node.accountKey)}${node.hostname ? ` · ${escHtml(node.hostname)}` : ''}` +
+        `${node.identityCount ? '' : ' · no identity'}`;
+
     item.innerHTML = `
       <div>
         <div class="account-name">${escHtml(node.name || node.hostname || node.accountKey)}</div>
-        <div class="account-meta">
-          ${escHtml(node.accountKey)}
-          ${node.hostname ? ` · ${escHtml(node.hostname)}` : ''}
-          ${node.identityCount ? '' : ' · no identity'}
-        </div>
+        <div class="account-meta">${meta}</div>
+        ${node.restorable
+          ? '<div class="account-meta">Configuration recovered from this node — restoring keeps ' +
+            'the original DeviceId, so the server sees the same device.</div>'
+          : ''}
       </div>
-      <button class="btn-remove" data-key="${escHtml(node.accountKey)}">Delete node</button>
+      <div style="display:flex; gap:8px">
+        ${node.restorable
+          ? `<button class="btn-secondary" style="padding:4px 10px; font-size:12px"
+                     data-restore="${escHtml(node.accountKey)}">Restore</button>`
+          : ''}
+        <button class="btn-remove" data-key="${escHtml(node.accountKey)}">Delete node</button>
+      </div>
     `;
     list.appendChild(item);
   }
@@ -199,6 +212,21 @@ async function loadOrphans() {
   list.querySelectorAll('.btn-remove').forEach(btn => {
     btn.addEventListener('click', () => removeOrphan(btn.dataset.key));
   });
+  list.querySelectorAll('[data-restore]').forEach(btn => {
+    btn.addEventListener('click', () => restoreOrphan(btn.dataset.restore));
+  });
+}
+
+async function restoreOrphan(accountKey) {
+  const result = await send({ type: 'RESTORE_TB_ACCOUNT', accountKey });
+  if (result?.success) {
+    showStatus(`Account ${result.username} restored with its original DeviceId. ` +
+               'A sync is running.', 'success');
+  } else {
+    showStatus(`Could not restore: ${result?.error || 'unknown error'}`, 'error');
+  }
+  await loadAccounts();
+  await loadOrphans();
 }
 
 async function removeOrphan(accountKey) {
@@ -236,6 +264,7 @@ function formData() {
   const data = {
     host:            $('host').value.trim().replace(/^https?:\/\//i, '').split('/')[0],
     username,
+    deviceId:        $('device-id').value.trim().toUpperCase(),
     email:           mailbox || username,
     fullName:        $('display-name').value.trim(),
     password:        $('password').value,
@@ -272,7 +301,7 @@ function formData() {
  * it, but the form should not suggest the action in the first place.
  */
 function resetForm() {
-  for (const id of ['username', 'display-name', 'password', 'host', 'mailbox-address',
+  for (const id of ['username', 'display-name', 'password', 'host', 'mailbox-address', 'device-id',
                     'custom-device-type', 'custom-model', 'custom-user-agent',
                     'custom-os', 'custom-os-language', 'custom-friendly-name']) {
     $(id).value = '';
@@ -292,6 +321,11 @@ function resetForm() {
 function validate(data, { requireHost = true, requireAddress = false } = {}) {
   if (!data.username) return 'Username is required';
   if (!data.password) return 'Password is required';
+
+  // MS-ASHTTP restricts DeviceId to 1–32 characters, letters and digits only.
+  if (data.deviceId && !/^[A-Z0-9]{1,32}$/.test(data.deviceId)) {
+    return `"${data.deviceId}" is not a valid Device ID — up to 32 letters and digits, no hyphens.`;
+  }
 
   const mailbox = $('mailbox-address').value.trim();
   if (mailbox && !looksLikeAddress(mailbox)) {

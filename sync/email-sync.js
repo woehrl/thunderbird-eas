@@ -31,6 +31,22 @@ import {
   resolveProfile,
 } from '../eas/protocol.js';
 
+/**
+ * Folder id of a container that may be a MailAccount or a MailFolder.
+ *
+ * Since Thunderbird 121 the folder APIs take a MailFolderId and reject a full
+ * MailAccount object (deprecated in MV2, removed in MV3). An account's
+ * container is its rootFolder, not the account itself.
+ *
+ * Order matters: a MailAccount also has an `id`, but it is the account key and
+ * not a folder id, so rootFolder has to be checked first.
+ */
+function folderIdOf(container) {
+  if (!container) return null;
+  if (container.rootFolder?.id) return container.rootFolder.id;   // MailAccount
+  return container.id || null;                                    // MailFolder
+}
+
 /** How long to stay quiet after the server refused the device. */
 const BLOCKED_BACKOFF_MS = 30 * 60 * 1000;
 /** Cap on Sync round trips per folder per cycle, so a server that keeps
@@ -54,6 +70,8 @@ export class AccountSync {
     this.tbAccount = null;      // MailAccount or MailFolder acting as root
     this.pushAbort = null;
     this.pushing   = false;
+    this._pingAbort = null;         // controller of the long poll in flight
+    this._pingInterrupted = false;  // set when we cancelled it ourselves
     this._maps     = null;      // { easFolderId: { easServerId: tbMessageId } }
     this._revMap   = null;      // { tbMessageId: { easFolderId, easServerId } }
     this._mapsDirty = new Set();
@@ -137,6 +155,12 @@ export class AccountSync {
    * @param {string[]} [opts.onlyCollections] restrict to these collection ids
    */
   async sync(opts = {}) {
+    // Give up the outstanding long poll first. Exchange serves a device on one
+    // session, so Sync requests issued while a Ping is parked end up waiting
+    // behind it until they hit their own timeout — which is what "the
+    // operation was aborted" in the log actually was.
+    this._dropCurrentPing();
+
     const previous = this._pendingSync || Promise.resolve();
     const next = previous.catch(() => {}).then(() => this._syncSerialised(opts));
     this._pendingSync = next.catch(() => {});
@@ -303,7 +327,7 @@ export class AccountSync {
     let tbFolder = await this._findChildFolder(container, easFolder.displayName);
     if (!tbFolder) {
       try {
-        tbFolder = await messenger.folders.create(container, easFolder.displayName);
+        tbFolder = await messenger.folders.create(folderIdOf(container), easFolder.displayName);
       } catch (e) {
         this.log(`could not create folder "${easFolder.displayName}": ${e.message}`);
         tbFolder = await this._findChildFolder(container, easFolder.displayName);
@@ -348,7 +372,7 @@ export class AccountSync {
     if (info.thunderbirdFolderId) {
       try {
         const tbFolder = await this._getFolderById(info.thunderbirdFolderId);
-        if (tbFolder) await messenger.folders.delete(tbFolder);
+        if (tbFolder) await messenger.folders.delete(tbFolder.id);
       } catch (e) {
         this.log(`could not delete Thunderbird folder for "${info.displayName}": ${e.message}`);
       }
@@ -373,7 +397,7 @@ export class AccountSync {
       try {
         const tbFolder = await this._getFolderById(info.thunderbirdFolderId);
         if (tbFolder && tbFolder.name !== easFolder.displayName) {
-          await messenger.folders.rename(tbFolder, easFolder.displayName);
+          await messenger.folders.rename(tbFolder.id, easFolder.displayName);
         }
       } catch (e) {
         this.log(`could not rename folder: ${e.message}`);
@@ -492,7 +516,7 @@ export class AccountSync {
     );
 
     try {
-      const msg = await messenger.messages.import(file, tbFolder, {
+      const msg = await messenger.messages.import(file, tbFolder.id, {
         read:    item.read,
         flagged: false,
       });
@@ -515,7 +539,10 @@ export class AccountSync {
     const tbId = this._getMapping(folderInfo.serverId, item.serverId);
     if (!tbId) return;
     try {
-      await messenger.messages.delete([tbId], true);   // skipTrash: already in the EAS trash
+      // Permanently, not into Thunderbird's trash: the server already moved the
+      // item to Deleted Items, and that folder syncs on its own — filing a
+      // second copy locally would duplicate it.
+      await messenger.messages.delete([tbId], { deletePermanently: true });
     } catch (_) { /* already gone */ }
     this._removeMapping(folderInfo.serverId, item.serverId);
   }
@@ -612,13 +639,50 @@ export class AccountSync {
     while (this.pushing && !signal.aborted) {
       if (this.isBackingOff()) { await this._sleep(60000, signal); continue; }
 
+      // Never park a long poll while a sync cycle is in flight.
+      await this._pendingSync?.catch(() => {});
+      if (!this.pushing || signal.aborted) break;
+
       let folders = this._mailFolders().map(f => ({ id: f.serverId, class: 'Email' }));
       if (!folders.length) break;
       if (maxFolders && folders.length > maxFolders) folders = folders.slice(0, maxFolders);
 
+      // The poll and the reaction to it are kept apart on purpose: only a
+      // failing poll says anything about the connection. Folding both into one
+      // try/catch made every failed folder sync shrink the heartbeat.
+      let result;
       try {
-        const result = await this.client.ping(heartbeat, folders, signal);
+        result = await this._ping(heartbeat, folders, signal);
+      } catch (e) {
+        if (signal.aborted) break;
 
+        // A poll we cancelled ourselves to make room for a sync is not a
+        // network problem and must not change the heartbeat.
+        if (this._pingInterrupted) { this._pingInterrupted = false; continue; }
+
+        if (e instanceof EasError && e.isFatalForNow) {
+          this.log(`push loop stopping: ${e.message}`);
+          if (e.code === ERR.DEVICE_BLOCKED) await this._enterBackoff(BLOCKED_BACKOFF_MS, e.message, e.code);
+          this.pushing = false;
+          break;
+        }
+
+        if (e instanceof EasError && e.code === ERR.NETWORK) {
+          // Intermediate proxies and NAT gateways cut idle connections well
+          // before the negotiated heartbeat; back off until it fits the path.
+          heartbeat = Math.max(HEARTBEAT.MIN, Math.floor(heartbeat / 2));
+          await this._patchAccount({ heartbeatSec: heartbeat });
+          this.log(`push: poll dropped, heartbeat reduced to ${heartbeat}s`);
+          await this._sleep(5000, signal);
+          continue;
+        }
+
+        this.log(`push error: ${e.message}`);
+        await this._sleep(30000, signal);
+        continue;
+      }
+
+      try {
         switch (result.status) {
           case PING_STATUS.EXPIRED:
             heartbeat = Math.min(HEARTBEAT.MAX, heartbeat + HEARTBEAT.STEP_UP);
@@ -669,17 +733,9 @@ export class AccountSync {
           break;
         }
 
-        if (e instanceof EasError && e.code === ERR.NETWORK) {
-          // Most likely the connection was cut mid-heartbeat.
-          heartbeat = Math.max(HEARTBEAT.MIN, Math.floor(heartbeat / 2));
-          await this._patchAccount({ heartbeatSec: heartbeat });
-          this.log(`push: connection dropped, heartbeat reduced to ${heartbeat}s`);
-          await this._sleep(5000, signal);
-          continue;
-        }
-
-        this.log(`push error: ${e.message}`);
-        await this._sleep(30000, signal);
+        // A follow-up sync failing is a sync problem; the poll itself was fine.
+        this.log(`push: follow-up sync failed: ${e.message}`);
+        await this._sleep(15000, signal);
       }
     }
 
@@ -687,10 +743,33 @@ export class AccountSync {
     this.log('push loop stopped');
   }
 
+  /** One long poll, cancellable both by the loop and by a starting sync. */
+  async _ping(heartbeat, folders, loopSignal) {
+    const controller = new AbortController();
+    const onLoopAbort = () => controller.abort();
+    loopSignal.addEventListener('abort', onLoopAbort, { once: true });
+    this._pingAbort = controller;
+    try {
+      return await this.client.ping(heartbeat, folders, controller.signal);
+    } finally {
+      loopSignal.removeEventListener('abort', onLoopAbort);
+      this._pingAbort = null;
+    }
+  }
+
+  /** Release the connection an outstanding long poll is holding. */
+  _dropCurrentPing() {
+    if (!this._pingAbort) return;
+    this._pingInterrupted = true;
+    this._pingAbort.abort();
+  }
+
   stopPushLoop() {
     this.pushing = false;
     this.pushAbort?.abort();
     this.pushAbort = null;
+    this._pingAbort = null;
+    this._pingInterrupted = false;
   }
 
   _sleep(ms, signal) {
@@ -764,7 +843,7 @@ export class AccountSync {
     const existing = await this._findChildFolder(local, rootName);
     if (existing) return existing;
 
-    return await messenger.folders.create(local, rootName);
+    return await messenger.folders.create(folderIdOf(local), rootName);
   }
 
   /**
@@ -776,7 +855,7 @@ export class AccountSync {
    */
   async _findChildFolder(container, name) {
     try {
-      const children = await messenger.folders.getSubFolders(container, false);
+      const children = await messenger.folders.getSubFolders(folderIdOf(container), false);
       const hit = (children || []).find(f => f.name === name);
       if (hit) return hit;
     } catch (_) { /* older API shape, fall through */ }
@@ -875,6 +954,33 @@ export class AccountSync {
     if (idx >= 0) accounts[idx] = { ...accounts[idx], ...persisted };
     else accounts.push(persisted);
     await messenger.storage.local.set({ accounts });
+
+    await this._mirrorAccountData(persisted);
+  }
+
+  /**
+   * Keep a copy of the configuration on the Thunderbird account node.
+   *
+   * storage.local is wiped when the add-on is removed, while the account node
+   * survives in the mail profile. Without this copy a reinstall loses the
+   * DeviceId, and a new DeviceId is a new device partnership on the server:
+   * another slot of the mailbox quota and a fresh quarantine cycle. Written
+   * only when the serialised value actually changed, since _saveAccount runs
+   * several times per sync cycle.
+   */
+  async _mirrorAccountData(persisted) {
+    if (typeof messenger.easAccount === 'undefined') return;
+    if (!this.account.tbAccountKey) return;
+
+    const serialised = JSON.stringify(persisted);
+    if (serialised === this._mirroredData) return;
+
+    try {
+      await messenger.easAccount.setAccountData(this.account.tbAccountKey, serialised);
+      this._mirroredData = serialised;
+    } catch (e) {
+      this.log(`could not mirror account data onto the account node: ${e.message}`);
+    }
   }
 
   async _resetSyncState() {

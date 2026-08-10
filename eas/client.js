@@ -355,7 +355,9 @@ export class EasClient {
    * @returns {Promise<{doc: object|null, bytes: Uint8Array, status: string|null}>}
    */
   async execute(cmd, body, opts = {}) {
-    const { autoProvision = true, params = {}, timeoutMs = 90000 } = opts;
+    // A Sync carrying a window of full MIME bodies is not a quick request, and
+    // the server may already be busy with this device's parked Ping.
+    const { autoProvision = true, params = {}, timeoutMs = 180000 } = opts;
     const bytes = body instanceof Uint8Array ? body : encode(body);
 
     const result = await this._send(cmd, bytes, params, timeoutMs);
@@ -390,7 +392,12 @@ export class EasClient {
 
   async _send(cmd, bytes, params, timeoutMs) {
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Our own timeout and a genuine connection failure both surface as an
+    // AbortError. Distinguishing them keeps "the operation was aborted" out of
+    // the log where "timed out" is the truth.
+    let timedOut = false;
+    const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
+
     let resp;
     try {
       resp = await this._fetch(this._url(cmd, params), {
@@ -399,6 +406,13 @@ export class EasClient {
         body:    bytes,
         signal:  controller.signal,
       });
+    } catch (e) {
+      if (timedOut) {
+        throw new EasError(ERR.NETWORK,
+          `${cmd} timed out after ${Math.round(timeoutMs / 1000)}s`,
+          { cmd, timeout: true });
+      }
+      throw e;
     } finally {
       clearTimeout(timer);
     }

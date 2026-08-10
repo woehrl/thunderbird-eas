@@ -30,6 +30,16 @@
         "parameters": []
       },
       {
+        "name": "setAccountData",
+        "type": "function",
+        "async": true,
+        "description": "Mirror the account configuration (never the password) onto the server node, so it survives removing and reinstalling the add-on.",
+        "parameters": [
+          { "name": "accountKey", "type": "string" },
+          { "name": "data",       "type": "string", "description": "Serialised account configuration." }
+        ]
+      },
+      {
         "name": "setSpecialFolder",
         "type": "function",
         "async": true,

@@ -36,6 +36,21 @@ const LOGIN_REALM = "Exchange ActiveSync";
 /** Marks the servers this add-on created, so orphans can be found later. */
 const MANAGED_PREF = "eas_managed_by_addon";
 
+/**
+ * Account configuration mirrored onto the server node.
+ *
+ * Removing a WebExtension wipes its storage.local, but the Thunderbird account
+ * node lives in the mail profile and survives. Without a copy here, an add-on
+ * that is removed and reinstalled loses the account — including its DeviceId,
+ * and a new DeviceId means a new device partnership on the server: another
+ * slot of a quota that is commonly five, and a fresh quarantine cycle. The
+ * password is deliberately not part of this; it stays in the password manager.
+ */
+const ACCOUNT_DATA_PREF = "eas_account_data";
+
+/** Refuse to write anything unreasonable into a preference. */
+const MAX_ACCOUNT_DATA = 256 * 1024;
+
 function importModule(esmPath, jsmPath, symbol) {
   try {
     return ChromeUtils.importESModule(esmPath)[symbol];
@@ -109,6 +124,9 @@ function listManagedAccounts(MailServices) {
     let managed = false;
     try { managed = server.getBoolValue(MANAGED_PREF); } catch (_) {}
 
+    let accountData = "";
+    try { accountData = server.getCharValue(ACCOUNT_DATA_PREF) || ""; } catch (_) {}
+
     let identityCount = 0;
     try { identityCount = account.identities?.length || 0; } catch (_) {}
 
@@ -120,6 +138,7 @@ function listManagedAccounts(MailServices) {
       username:     server.username || "",
       markedManaged: managed,
       identityCount,
+      accountData,
     });
   }
   return out;
@@ -290,6 +309,24 @@ this.easAccount = class extends ExtensionCommon.ExtensionAPI {
          */
         async listAccounts() {
           return listManagedAccounts(getMailServices());
+        },
+
+        /**
+         * Mirror the account configuration onto the server node so it survives
+         * removing and reinstalling the add-on. Never include the password.
+         */
+        async setAccountData(accountKey, data) {
+          const MailServices = getMailServices();
+          const account = findAccountByKey(MailServices, accountKey);
+          if (!account?.incomingServer) return false;
+          const value = String(data || "");
+          if (value.length > MAX_ACCOUNT_DATA) return false;
+          try {
+            account.incomingServer.setCharValue(ACCOUNT_DATA_PREF, value);
+            return true;
+          } catch (_) {
+            return false;
+          }
         },
 
         /**
