@@ -12,7 +12,7 @@
  */
 
 import { verifyCodePages, encodeTag } from '../eas/codepages.js';
-import { encode, decode, dump, el, tel, eel } from '../eas/wbxml.js';
+import { encode, decode, dump, el, tel, eel, bel } from '../eas/wbxml.js';
 import {
   buildFolderSync, parseFolderSync,
   buildSync, parseSync,
@@ -166,6 +166,28 @@ const sendMail = decode(encode(el('ComposeMail', 'SendMail',
   tel('ComposeMail', 'Mime', 'hi'))));
 check('self-closing element preserved',
   sendMail.children.map(c => c.tag).join(','), 'ClientId,SaveInSentItems,Mime');
+
+// ── 9. SendMail, both MIME encodings ────────────────────────────────
+// MS-ASCMD models the Mime value as opaque data; some servers only accept an
+// inline string. A rejected encoding comes back as status 102 (InvalidWBXML),
+// so the client tries opaque first and falls back — both shapes have to
+// round-trip.
+const SAMPLE_MIME = 'From: =?UTF-8?B?w7Y=?= <a@b.org>\r\nSubject: Test\r\n\r\nBody';
+
+for (const [label, mimeNode] of [
+  ['opaque', bel('ComposeMail', 'Mime', new TextEncoder().encode(SAMPLE_MIME))],
+  ['inline', tel('ComposeMail', 'Mime', SAMPLE_MIME)],
+]) {
+  const sent = decode(encode(el('ComposeMail', 'SendMail',
+    tel('ComposeMail', 'ClientId', 'TBEAS1'),
+    eel('ComposeMail', 'SaveInSentItems'),
+    mimeNode)));
+
+  check(`SendMail (${label}) child order`,
+    sent.children.map(c => c.tag).join(','), 'ClientId,SaveInSentItems,Mime');
+  check(`SendMail (${label}) MIME round-trips`,
+    sent.children[2].text, SAMPLE_MIME);
+}
 
 if (process.argv.includes('--verbose')) {
   console.log('\nfull Sync request:\n' + dump(fullSync));

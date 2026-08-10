@@ -542,6 +542,7 @@ Remaining weaknesses:
 | **Capture a real Outlook session** | The reference document describes a mitmproxy setup driven by repointing Outlook's `EAS Server URL` registry value. That would settle header order, heartbeat and the provisioning sequence — replacing several reconstructions with measurements. The quarantine notification has already confirmed DeviceType, User-Agent and negotiated version. |
 | **Surface the quarantine state** | A quarantined device provisions and receives its folder tree, so the add-on reports a healthy account with an almost empty mailbox. Exchange offers no protocol-level signal for this; the only marker is the notification message itself. Worth considering: flag an account that has folders but has imported nothing but a single message from the server's own notification sender. |
 | **Outgoing mail via drafts** | `SendMail` works, but composing into the Drafts folder (16.x `Sync/Add`) is not implemented. |
+| **Message list goes stale after an import** | Observed once: importing into the folder currently displayed left the thread pane showing only the newly imported message. The data was intact — switching folders and back restored the full list — so this is a view refresh problem, not loss. Not attributed yet; `messages.import()` is the only thing this add-on does to a folder. Worth discriminating: does it also happen when the target folder is *not* the one on screen? |
 
 ### Medium
 

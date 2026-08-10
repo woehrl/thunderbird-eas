@@ -245,9 +245,21 @@ export class SyncManager {
       try {
         const mime = await this._buildMime(tab);
         await sync.sendMail(mime);
-        return { cancel: true };   // sent over EAS; suppress the SMTP send
+
+        // Cancelling is how the SMTP send is suppressed, but Thunderbird reads
+        // a cancelled send as "the user changed their mind" and leaves the
+        // compose window standing. It has no way to know the message already
+        // went out over EAS, so the window has to be closed here. Deferred by a
+        // tick so Thunderbird finishes handling the cancellation first.
+        setTimeout(() => {
+          messenger.tabs.remove(tab.id).catch(err =>
+            console.warn('[EAS] could not close the compose window:', err.message));
+        }, 0);
+
+        return { cancel: true };
       } catch (e) {
         console.error('[EAS] SendMail failed:', e);
+        this._log(sync.account.id, [`SendMail failed: ${e.message}`]);
         this._notify('Sending failed',
           `The message could not be sent over ActiveSync: ${e.message}`);
         // Cancelling keeps the compose window open with the message intact so
@@ -280,10 +292,10 @@ export class SyncManager {
     );
 
     const headers = [];
-    if (details.from)        headers.push(`From: ${details.from}`);
-    if (details.to?.length)  headers.push(`To: ${details.to.join(', ')}`);
-    if (details.cc?.length)  headers.push(`Cc: ${details.cc.join(', ')}`);
-    if (details.bcc?.length) headers.push(`Bcc: ${details.bcc.join(', ')}`);
+    if (details.from)        headers.push(`From: ${encodeAddressList([details.from])}`);
+    if (details.to?.length)  headers.push(`To: ${encodeAddressList(details.to)}`);
+    if (details.cc?.length)  headers.push(`Cc: ${encodeAddressList(details.cc)}`);
+    if (details.bcc?.length) headers.push(`Bcc: ${encodeAddressList(details.bcc)}`);
     if (details.subject)     headers.push(`Subject: ${encodeHeaderWord(details.subject)}`);
     headers.push(`Date: ${new Date().toUTCString()}`);
     headers.push('MIME-Version: 1.0');
@@ -314,7 +326,10 @@ export class SyncManager {
       const name = file.name || attachment.name || 'attachment';
       parts.push([
         `--${boundary}`,
-        `Content-Type: ${file.type || 'application/octet-stream'}; name="${sanitizeParam(name)}"`,
+        // The legacy name= parameter has no encoding of its own, so it is only
+        // emitted for ASCII; Content-Disposition below carries the real name.
+        `Content-Type: ${file.type || 'application/octet-stream'}` +
+          (/^[\x20-\x7E]*$/.test(name) ? `; name="${sanitizeParam(name)}"` : ''),
         'Content-Transfer-Encoding: base64',
         `Content-Disposition: attachment; ${encodeFilenameParam(name)}`,
         '',
@@ -342,9 +357,29 @@ export class SyncManager {
       });
     }
 
+    // Thunderbird's Delete moves the message to the trash folder and fires
+    // onMoved. onDeleted only fires on permanent removal, so listening to it
+    // alone means an ordinary delete never reaches the server — the message
+    // disappears locally and stays put in OWA.
+    if (messenger.messages.onMoved) {
+      messenger.messages.onMoved.addListener(async (originals, moved) => {
+        const from = originals?.messages || originals || [];
+        const to   = moved?.messages || moved || [];
+        for (let i = 0; i < from.length && i < to.length; i++) {
+          for (const [, sync] of this.syncs) {
+            try {
+              if (await sync.propagateMove(from[i].id, to[i])) break;
+            } catch (e) {
+              console.warn('[EAS] move propagation failed:', e.message);
+            }
+          }
+        }
+      });
+    }
+
     if (messenger.messages.onDeleted) {
       messenger.messages.onDeleted.addListener(async messages => {
-        for (const msg of messages.messages || messages || []) {
+        for (const msg of messages?.messages || messages || []) {
           for (const [, sync] of this.syncs) {
             try {
               if (await sync.propagateDelete(msg.id)) break;
@@ -830,6 +865,36 @@ function encodeHeaderWord(value) {
   let binary = '';
   for (const b of bytes) binary += String.fromCharCode(b);
   return `=?UTF-8?B?${btoa(binary)}?=`;
+}
+
+/**
+ * Render an address header.
+ *
+ * RFC 5322 headers are 7-bit ASCII: a display name like "Florian Wöhrl" has to
+ * be an RFC 2047 encoded word, and an ASCII name containing specials has to be
+ * a quoted string. Passing Thunderbird's formatted address straight through
+ * produces an 8-bit header, which a strict server rejects — and EAS reports
+ * that as a generic encoding failure with no hint where to look.
+ */
+function encodeAddress(value) {
+  const raw = String(value).trim();
+  const match = raw.match(/^(.*)<([^<>]+)>\s*$/);
+  if (!match) return raw;                       // bare address, nothing to encode
+
+  const address = match[2].trim();
+  const name = match[1].trim().replace(/^"(.*)"$/s, '$1').replace(/\\(.)/g, '$1');
+  if (!name) return `<${address}>`;
+
+  if (!/^[\x20-\x7E]*$/.test(name)) return `${encodeHeaderWord(name)} <${address}>`;
+  // RFC 5322 specials in an unquoted display name would change the parse.
+  if (/[()<>@,;:\\".[\]]/.test(name)) {
+    return `"${name.replace(/([\\"])/g, '\\$1')}" <${address}>`;
+  }
+  return `${name} <${address}>`;
+}
+
+function encodeAddressList(list) {
+  return list.map(encodeAddress).join(', ');
 }
 
 function base64Lines(arrayBuffer) {

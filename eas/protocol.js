@@ -105,6 +105,9 @@ export const MIME_SUPPORT = { NEVER: 0, SMIME_ONLY: 1, ALWAYS: 2 };
 export const STATUS = {
   SUCCESS:                    '1',
   INVALID_SYNC_KEY:           '3',
+  INVALID_CONTENT:            '101',
+  INVALID_WBXML:              '102',
+  INVALID_MIME:               '107',
   PROTOCOL_ERROR:             '4',
   SERVER_ERROR:               '5',
   SYNC_STATE_CORRUPT:         '9',
@@ -128,6 +131,54 @@ export const STATUS = {
   DEVICE_INFORMATION_REQUIRED: '165',
   MAX_DEVICES_REACHED:        '177',
 };
+
+/**
+ * Names for the status codes that actually turn up in logs. A bare
+ * "status 102" tells nobody anything; "102 (InvalidWBXML)" points straight at
+ * the encoder.
+ */
+export const STATUS_NAMES = {
+  '101': 'InvalidContent',
+  '102': 'InvalidWBXML',
+  '103': 'InvalidXML',
+  '104': 'InvalidDateTime',
+  '105': 'InvalidCombinationOfIDs',
+  '106': 'InvalidIDs',
+  '107': 'InvalidMIME',
+  '108': 'DeviceIdMissingOrInvalid',
+  '109': 'DeviceTypeMissingOrInvalid',
+  '110': 'ServerError',
+  '111': 'ServerErrorRetryLater',
+  '112': 'ActiveDirectoryAccessDenied',
+  '113': 'MailboxQuotaExceeded',
+  '115': 'SendQuotaExceeded',
+  '116': 'MessageRecipientUnresolved',
+  '117': 'MessageReplyNotAllowed',
+  '118': 'MessagePreviouslySent',
+  '119': 'MessageHasNoRecipient',
+  '120': 'MailSubmissionFailed',
+  '121': 'MessageReplyFailed',
+  '122': 'AttachmentIsTooLarge',
+  '126': 'UserDisabledForSync',
+  '129': 'DeviceIsBlockedForThisUser',
+  '130': 'AccessDenied',
+  '137': 'CommandNotSupported',
+  '138': 'VersionNotSupported',
+  '140': 'RemoteWipeRequested',
+  '141': 'DeviceNotProvisionable',
+  '142': 'DeviceNotProvisioned',
+  '143': 'PolicyRefresh',
+  '144': 'InvalidPolicyKey',
+  '145': 'ExternallyManagedDevicesNotAllowed',
+  '164': 'BodyPartPreferenceTypeNotSupported',
+  '165': 'DeviceInformationRequired',
+  '177': 'MaximumDevicesReached',
+};
+
+export function describeStatus(status) {
+  const name = STATUS_NAMES[String(status)];
+  return name ? `${status} (${name})` : String(status);
+}
 
 /** Statuses that mean "run the Provision handshake, then retry". */
 export const PROVISION_REQUIRED_STATUS = new Set([

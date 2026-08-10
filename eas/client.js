@@ -18,10 +18,10 @@
 import {
   EAS_PATH, MIME_WBXML, MIME_RFC822,
   VERSION_PREFERENCE, INVALID_CLIENT_VERSIONS, DEFAULT_VERSION, versionValue,
-  STATUS, PROVISION_REQUIRED_STATUS, DEVICE_BLOCKED_STATUS,
+  STATUS, PROVISION_REQUIRED_STATUS, DEVICE_BLOCKED_STATUS, describeStatus,
   resolveProfile,
 } from './protocol.js';
-import { encode, decode, el, tel, eel, find, getText } from './wbxml.js';
+import { encode, decode, el, tel, eel, bel, find, getText } from './wbxml.js';
 import { buildDeviceInformation, buildSettings } from './commands.js';
 
 // ─────────────────────────────────────────────────────────────────────
@@ -615,20 +615,27 @@ export class EasClient {
     const mime = typeof mimeData === 'string' ? mimeData : new TextDecoder().decode(mimeData);
 
     if (versionValue(this.easVersion) >= 140) {
-      const clientId = `TBEAS${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
-      const node = el('ComposeMail', 'SendMail',
-        tel('ComposeMail', 'ClientId', clientId),
-        saveInSent ? eel('ComposeMail', 'SaveInSentItems') : null,
-        tel('ComposeMail', 'Mime', mime),
-      );
+      // MS-ASCMD models the Mime element's value as opaque data, and Exchange
+      // itself emits OPAQUE for message bodies — but servers differ, and a
+      // rejected encoding comes back as the thoroughly unhelpful status 102
+      // (InvalidWBXML). Rather than guess, try opaque and fall back to an
+      // inline string once. Whichever works is remembered for this session.
+      const encodings = this._mimeEncoding ? [this._mimeEncoding] : ['opaque', 'inline'];
+      let lastStatus = null;
 
-      const { doc } = await this.request('SendMail', encode(node));
-      // An empty body means success; a body carries a <Status>.
-      const status = doc ? getText(doc, 'ComposeMail:Status') : null;
-      if (status && status !== STATUS.SUCCESS) {
-        throw new EasError(ERR.SERVER_ERROR, `SendMail failed with status ${status}.`, { status });
+      for (const encoding of encodings) {
+        const status = await this._sendMailOnce(mime, saveInSent, encoding);
+        if (status === null || status === STATUS.SUCCESS) {
+          this._mimeEncoding = encoding;
+          return;
+        }
+        lastStatus = status;
+        if (status !== STATUS.INVALID_WBXML) break;   // not an encoding problem
+        this.log(`SendMail rejected the ${encoding} MIME encoding (status ${status})`);
       }
-      return;
+
+      throw new EasError(ERR.SERVER_ERROR,
+        `SendMail failed with status ${describeStatus(lastStatus)}.`, { status: lastStatus });
     }
 
     // Legacy path for 12.x and 2.5.
@@ -646,6 +653,27 @@ export class EasClient {
     if (resp.status !== 200 && resp.status !== 201 && resp.status !== 204) {
       throw await this._httpError('SendMail', resp);
     }
+  }
+
+  /**
+   * One SendMail attempt.
+   * @returns {Promise<string|null>} the reported status, or null for an empty
+   *   (successful) response.
+   */
+  async _sendMailOnce(mime, saveInSent, encoding) {
+    const clientId = `TBEAS${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+    const node = el('ComposeMail', 'SendMail',
+      tel('ComposeMail', 'ClientId', clientId),
+      saveInSent ? eel('ComposeMail', 'SaveInSentItems') : null,
+      encoding === 'opaque'
+        ? bel('ComposeMail', 'Mime', new TextEncoder().encode(mime))
+        : tel('ComposeMail', 'Mime', mime),
+    );
+
+    const { doc } = await this.request('SendMail', encode(node));
+    // An empty body means success; a body carries a <Status>.
+    return doc ? getText(doc, 'ComposeMail:Status') : null;
   }
 
   // ── Ping ───────────────────────────────────────────────────────────

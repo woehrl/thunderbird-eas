@@ -22,6 +22,7 @@ import {
   buildFolderSync, parseFolderSync,
   buildSync, parseSync,
   buildItemOperationsFetch, parseItemOperationsFetch,
+  buildMoveItems, parseMoveItems,
   buildSettings, parseSettings,
   FILTER_TYPE, DEFAULT_TRUNCATION_SIZE,
 } from '../eas/commands.js';
@@ -490,6 +491,11 @@ export class AccountSync {
   }
 
   async _importMessage(item, tbFolder, folderInfo) {
+    // Already here. Happens after a move we mirrored ourselves — the mapping
+    // for the destination was registered from the MoveItems response, so the
+    // Add the server reports for it must not become a second copy.
+    if (this._getMapping(folderInfo.serverId, item.serverId)) return;
+
     let mime = item.mime;
 
     if (item.truncated) {
@@ -585,7 +591,70 @@ export class AccountSync {
     return !failed;
   }
 
-  /** Push a local deletion back to the server. */
+  /**
+   * Mirror a local folder move onto the server.
+   *
+   * This is also how deletion arrives. Thunderbird's Delete moves a message to
+   * the trash folder and fires onMoved; onDeleted is only for permanent
+   * removal. Exchange sees it the same way — deleting is a move to Deleted
+   * Items — so both map onto MoveItems.
+   *
+   * MoveItems is used rather than a Sync <Delete> even for the trash, because
+   * its response carries the new ServerId. That lets the mapping be updated
+   * straight away, so when the destination collection later reports the item
+   * as an Add it is recognised instead of imported a second time.
+   *
+   * @param {number} oldTbMessageId  id before the move
+   * @param {object} movedMessage    MessageHeader after the move
+   * @returns {Promise<boolean>} true if this account owned the message
+   */
+  async propagateMove(oldTbMessageId, movedMessage) {
+    const mapping = this._getReverseMapping(oldTbMessageId);
+    if (!mapping) return false;
+
+    const source = this.account.folders?.[mapping.easFolderId];
+    const destinationFolderId = movedMessage?.folder?.id || movedMessage?.folderId || null;
+    const destination = Object.values(this.account.folders || {})
+      .find(f => f.thunderbirdFolderId === destinationFolderId);
+
+    if (!destination) {
+      // Moved out of this account entirely — into Local Folders, say. Mirroring
+      // that as a server-side delete would be a guess with destructive
+      // consequences, so the mapping is simply dropped.
+      this.log('message moved outside the account — not mirrored to the server');
+      this._removeMapping(mapping.easFolderId, mapping.easServerId);
+      await this._flushMaps();
+      return true;
+    }
+
+    if (destination.serverId === mapping.easFolderId) return true;   // nothing moved
+
+    const { doc } = await this.client.request('MoveItems', buildMoveItems([{
+      srcMsgId: mapping.easServerId,
+      srcFldId: mapping.easFolderId,
+      dstFldId: destination.serverId,
+    }]));
+
+    const [response] = parseMoveItems(doc);
+    // Move status 3 is success. 1 means "invalid source collection or item not
+    // found" — the one command in this protocol where status 1 is a failure.
+    if (!response || response.status !== '3') {
+      this.log(`move to "${destination.displayName}" rejected with status ${response?.status ?? '?'}`);
+      return true;
+    }
+
+    this._removeMapping(mapping.easFolderId, mapping.easServerId);
+    if (response.dstMsgId) {
+      this._setMapping(destination.serverId, response.dstMsgId, movedMessage.id);
+    }
+    await this._flushMaps();
+
+    this.log(`moved a message from "${source?.displayName ?? mapping.easFolderId}" ` +
+             `to "${destination.displayName}" on the server`);
+    return true;
+  }
+
+  /** Push a permanent local deletion back to the server. */
   async propagateDelete(tbMessageId) {
     const mapping = this._getReverseMapping(tbMessageId);
     if (!mapping) return false;
