@@ -14,7 +14,8 @@ Eine deutschsprachige Schritt-für-Schritt-Anleitung liegt in [ANLEITUNG.md](ANL
 
 - Email sync for Inbox, Sent, Drafts, Deleted and custom folders
 - Outgoing mail through EAS `SendMail` — no SMTP server required
-- Read-flag and delete changes propagated back to the server
+- Read-flag changes propagated back to the server, and folder moves mirrored as EAS `MoveItems`
+  — deleting locally moves the message to Deleted Items on the server, as Exchange itself does
 - **Push** via the EAS `Ping` command with an adaptive heartbeat, plus interval polling as a fallback
 - Autodiscover (V2/JSON with POX fallback) so only the mailbox address is needed
 - Full two-phase provisioning, including the in-band status codes Exchange actually uses
@@ -98,6 +99,10 @@ If the wrench is greyed out and the Tools entry is missing, the extension's back
 
 The **EAS Sync** toolbar button (status display and *Sync All*) is not shown by default: right-click the toolbar → **Customise…** → drag the extension's icon in.
 
+### Leftover account nodes
+
+Thunderbird offers no Delete for `none`-type accounts, so a node left behind by a failed setup — or by removing and reinstalling the add-on, which wipes extension storage while the node survives — cannot be removed through Thunderbird's own UI. The setup page lists such nodes and offers **Delete**, and **Restore** where the node still carries a usable copy of the configuration. Restoring keeps the original DeviceId, so the server keeps seeing the same device.
+
 1. Open that page
 2. Enter the mailbox address and password
 3. Press **Find server** — Autodiscover fills in the host, or say so if it cannot
@@ -117,7 +122,11 @@ A measurement against a production Exchange 2019 in August 2026 returned:
 | `Android` | `Android/14.0` | HTTP 403 |
 | `TBSync` | `Thunderbird-EAS/1.0` | HTTP 403 |
 
-Whether the 403 came from an ABQ rule or from an exhausted device quota was never resolved — a "5 of 5 devices" notification arrived during the run. Either way the default profile is `WindowsOutlook15`, which is verified to be accepted.
+That measurement was later explained: the mailbox device quota was exhausted at the time, and status 165 (`DeviceInformationRequired`) accounted for the rest. With the quota cleared, `Thunderbird` provisions and syncs against the same server.
+
+**The default is therefore the honest `Thunderbird` fingerprint.** The imitation profiles exist for servers that admit only known clients — presenting as another vendor's product without need would misreport the device in every administrator's inventory.
+
+Its User-Agent is `Thunderbird-EAS/1.0` and deliberately carries no Thunderbird version. MS-ASHTTP allows a server to track the User-Agent across requests and block a device that changes it too often, and a Thunderbird version string changes with every update. The running version is reported through `Settings/DeviceInformation` instead, where it is display metadata and changing it is expected — it shows up in the OWA device list as `Thunderbird 153.0.2 (user@domain)`.
 
 The profile also decides the protocol version: a client calling itself `WindowsOutlook15` negotiates 14.0, because that is what real Outlook does. Asking for 16.1 under that name is a fingerprint that does not exist anywhere.
 
@@ -133,6 +142,8 @@ The profile also decides the protocol version: a client calling itself `WindowsO
 | Sync messages from | `FilterType` — limits how far back the initial sync reaches |
 | Credential encoding | UTF-8 by default. Real Outlook sends Basic credentials as ISO-8859-1; with a non-ASCII password that difference looks exactly like a wrong password |
 | Push (Ping) | Long-poll for changes instead of waiting for the next interval |
+| Device ID | Leave empty to generate one. Reuse an existing ID to re-attach to a partnership the server already knows — after reinstalling, or on another profile — instead of consuming another quota slot and starting a fresh quarantine |
+| Mailbox address | Only when the login is not the mailbox address itself |
 
 ---
 

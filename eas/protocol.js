@@ -262,8 +262,31 @@ export const HEARTBEAT = {
  */
 export const DEVICE_PROFILES = [
   {
+    id:           'Thunderbird',
+    label:        'Thunderbird — honest fingerprint (recommended)',
+    deviceType:   'Thunderbird',
+    // Deliberately carries no Thunderbird version. MS-ASHTTP allows a server to
+    // track the User-Agent across requests and block a device that changes it
+    // too often, and a Thunderbird version string changes with every update.
+    // The number here is this client's own, bumped only when its behaviour on
+    // the wire changes. The running Thunderbird version is reported through
+    // Settings/DeviceInformation instead, where it is display metadata and
+    // changing it is expected.
+    userAgent:    'Thunderbird-EAS/1.0',
+    model:        'Thunderbird',
+    os:           '',        // filled at runtime
+    osLanguage:   '',        // filled at runtime
+    friendlyName: 'Thunderbird',
+    maxVersion:   '14.1',
+    windowSize:   100,
+    sendSettings: true,
+    verified:     true,
+    note:         'Says what it is. Accepted by the reference Exchange 2019. Switch to an ' +
+                  'imitation profile only if the server rejects unknown clients with HTTP 403.',
+  },
+  {
     id:           'WindowsOutlook15',
-    label:        'Outlook Desktop (Windows) — verified accepted',
+    label:        'Outlook Desktop (Windows) — imitation, accepted fallback',
     deviceType:   'WindowsOutlook15',
     userAgent:    'Outlook/16.0 (16.0.17932.20884; C2R; x64)',
     model:        'WindowsOutlook15',
@@ -278,7 +301,7 @@ export const DEVICE_PROFILES = [
   },
   {
     id:           'iPhone',
-    label:        'iPhone (iOS Mail) — verified accepted',
+    label:        'iPhone (iOS Mail) — imitation, accepted fallback',
     deviceType:   'iPhone',
     userAgent:    'Apple-iPhone14C1/2011.223',
     model:        'iPhone',
@@ -289,26 +312,11 @@ export const DEVICE_PROFILES = [
     windowSize:   100,
     sendSettings: true,
     verified:     true,
-    note:         'Second fingerprint verified as accepted by the reference server.',
-  },
-  {
-    id:           'Thunderbird',
-    label:        'Thunderbird (honest) — may be blocked by ABQ rules',
-    deviceType:   'Thunderbird',
-    userAgent:    'Thunderbird/140.9',
-    model:        'Thunderbird',
-    os:           '',        // filled at runtime
-    osLanguage:   '',        // filled at runtime
-    friendlyName: 'Thunderbird',
-    maxVersion:   '14.1',
-    windowSize:   100,
-    sendSettings: true,
-    verified:     false,
-    note:         'Truthful fingerprint. A server with an Allow/Block/Quarantine whitelist will answer HTTP 403.',
+    note:         'Second imitation fingerprint accepted by the reference server.',
   },
   {
     id:           'Android',
-    label:        'Android Mail (Samsung) — may be blocked by ABQ rules',
+    label:        'Android Mail (Samsung) — imitation, was rejected',
     deviceType:   'Android',
     userAgent:    'Android-Mail/2026.03.09.884664556.Release',
     model:        'SM-G975F',
@@ -319,11 +327,20 @@ export const DEVICE_PROFILES = [
     windowSize:   100,
     sendSettings: true,
     verified:     false,
-    note:         'Returned HTTP 403 in the reference measurement.',
+    note:         'Returned HTTP 403 in the reference measurement, though the mailbox device quota was exhausted at the time. Little reason to prefer it.',
   },
 ];
 
-export const DEFAULT_PROFILE_ID = 'WindowsOutlook15';
+// Honest by default. The imitation profiles exist for servers that only admit
+// known clients; presenting as another vendor's product without need would
+// misreport this device in every administrator's inventory.
+//
+// Also the value the migration assigns to accounts stored before profiles
+// existed — which is correct, because that build sent DeviceType=Thunderbird
+// too. If this constant ever moves again, pin the migration to the literal
+// instead: changing an existing account's DeviceType registers a second device
+// with the server.
+export const DEFAULT_PROFILE_ID = 'Thunderbird';
 
 function _detectOS() {
   const ua = navigator.userAgent;
@@ -359,14 +376,16 @@ export function resolveProfile(account = {}) {
   const profile = DEVICE_PROFILES.find(p => p.id === account.deviceProfileId) || base;
 
   if (profile.id === 'Thunderbird') {
+    // The running version goes into the display metadata, never into the
+    // User-Agent: that string has to stay constant for the life of the
+    // installation, and Thunderbird's version does not.
     const version = _detectTBVersion();
     const os      = _detectOS();
     return {
       ...profile,
-      os,
-      osLanguage: navigator.language || '',
-      userAgent:  version ? `Thunderbird/${version}` : profile.userAgent,
-      label:      version ? `Mozilla Thunderbird ${version} (${os || 'Desktop'})` : profile.label,
+      os:           os || profile.os,
+      osLanguage:   navigator.language || '',
+      friendlyName: version ? `Thunderbird ${version}` : profile.friendlyName,
     };
   }
 

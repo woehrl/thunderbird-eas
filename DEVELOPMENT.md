@@ -201,9 +201,9 @@ A profile bundles `DeviceType`, `User-Agent`, `maxVersion`, `windowSize` and whe
 
 | Profile | DeviceType | Version | Verified |
 |---|---|---|---|
-| `WindowsOutlook15` (default) | `WindowsOutlook15` | 14.0 | accepted |
+| `Thunderbird` (default) | `Thunderbird` | 14.1 | accepted |
+| `WindowsOutlook15` | `WindowsOutlook15` | 14.0 | accepted |
 | `iPhone` | `iPhone` | 14.1 | accepted |
-| `Thunderbird` | `Thunderbird` | 14.1 | may be blocked |
 | `Android` | `Android` | 14.1 | returned 403 |
 
 Version and DeviceType are coupled on purpose. Outlook's EAS stack is an Outlook 2013 legacy component that negotiates exactly 14.0 — a client calling itself `WindowsOutlook15` and asking for 16.1 is a fingerprint that exists nowhere.
@@ -251,7 +251,11 @@ That confirms the whole fingerprint end to end, including the empty OS/IMEI fiel
 | `Individual` | Per-mailbox or per-device rule | Sometimes |
 | `DeviceRule` | ABQ rule on DeviceType / User-Agent | Yes |
 
-Consequences in the code: `WindowsOutlook15` is the default, 403 messages name both possible causes, and `probeFingerprints()` warns before running.
+A later run settled it. With the quota cleared, `Thunderbird` provisioned and synced against the same server — so nothing was ever blocked on DeviceType. The 403s were the quota, and the subsequent failures were status 165.
+
+The default is therefore the honest `Thunderbird` profile; the imitations are a fallback for servers that admit only known clients. Its User-Agent, `Thunderbird-EAS/1.0`, carries no Thunderbird version on purpose: MS-ASHTTP permits a server to track the User-Agent across requests and block a device that changes it too often, and a Thunderbird version string changes with every update. The number is this client's own, bumped only when its behaviour on the wire changes. The running Thunderbird version travels in `Settings/DeviceInformation` as `FriendlyName`, where it is display metadata and churn is expected.
+
+403 messages name both possible causes, and `probeFingerprints()` warns before running.
 
 Note that a quarantined device is *not* refused: it provisions, gets the folder hierarchy and receives exactly one message — the notification itself. A client that treats "folders appeared" as success will report a healthy account with an almost empty mailbox.
 
@@ -346,13 +350,26 @@ EAS schemas are ordered sequences. `Collection` children must appear as `Class?,
 
 ### SendMail
 
-From 14.0, `SendMail` is a WBXML request on the ComposeMail code page carrying `<Mime>`; the raw `message/rfc822` body form is 2.5/12.x only. The previous implementation always used the old form. Both paths exist now, selected by the negotiated version.
+From 14.0, `SendMail` is a WBXML request on the ComposeMail code page carrying `<Mime>`; the raw `message/rfc822` body form is 2.5/12.x only. Both paths exist, selected by the negotiated version.
 
 `SaveInSentItems` is sent so the server files the copy; the next sync picks it up from the Sent folder.
 
+**The `Mime` encoding is negotiated by trial.** MS-ASCMD models the element's value as opaque data, and Exchange emits OPAQUE for message bodies itself, but servers differ and a rejected encoding comes back as status 102 (`InvalidWBXML`) with nothing else to go on. The client sends OPAQUE, falls back to an inline string once on 102, and remembers which the server accepted for the rest of the session.
+
+**Address headers must be RFC 2047 encoded.** A display name like `Florian Wöhrl` passed through verbatim produces an 8-bit `From` header, which RFC 5322 forbids and a strict server rejects — reported, again, as a generic encoding failure. `encodeAddress()` encodes non-ASCII names as encoded words and quotes ASCII names containing specials, so `Doe, Jane <j@d.org>` does not parse as two recipients. The same reasoning removes the legacy `name=` parameter from `Content-Type` for non-ASCII filenames; `Content-Disposition` carries the encoded form.
+
 ### Pushing local changes
 
-Read-flag and delete changes are sent as `Commands` inside a `Sync` with **`GetChanges=0`**. Without that, the server's own changes come back in the same response, get acknowledged by the new sync key, and are never imported — silent mail loss. The old code destructured a `getChanges` option and never used it.
+Read-flag changes are sent as `Commands` inside a `Sync` with **`GetChanges=0`**. Without that, the server's own changes come back in the same response, get acknowledged by the new sync key, and are never imported — silent mail loss.
+
+**Deleting is moving.** Thunderbird's Delete moves the message to the trash folder and fires `messages.onMoved`; `onDeleted` fires only for permanent removal. Listening on `onDeleted` alone means an ordinary delete never reaches the server: the message vanishes locally and stays put in OWA. Exchange takes the same view — deleting is a move to Deleted Items — so both map onto `MoveItems`.
+
+`MoveItems` is used rather than a `Sync` `<Delete>` even for the trash, because its response carries the new `DstMsgId`. Updating the mapping immediately means the destination collection's later `Add` is recognised rather than imported as a second copy. An unconditional guard in the import path backs that up: an item whose `(collection, ServerId)` already has a mapping is skipped.
+
+Two traps worth naming:
+
+- **Move reports success as status 3.** This is the one command here where status `1` is a failure (`invalid source collection or item not found`). A `status !== '1'` check logs every successful move as an error.
+- **A move out of the account is deliberately not mirrored.** Dragging a message into Local Folders could be read as a server-side delete, but that is a guess with destructive consequences. The mapping is dropped and the server copy left alone.
 
 ---
 
@@ -439,8 +456,16 @@ Thunderbird has no EAS backend, so an EAS mailbox cannot be a server of its own 
 | `createAccount(email, host, opts)` | server + account + identity; idempotent, returns the account key |
 | `setSpecialFolder(key, path, role)` | sets `nsMsgFolderFlags` and points the identity at Sent/Drafts/Archive |
 | `setAccountName(key, name)` | folder-pane display name |
+| `listAccounts()` | every node this add-on could have created, for orphan cleanup |
+| `setAccountData(key, json)` | mirrors the account configuration onto the server node |
 | `removeAccount(key)` | account plus local mail files |
 | `storePassword` / `getPassword` / `removePassword` | `nsILoginManager`, realm `Exchange ActiveSync` |
+
+`findLogins()` and `addLogin()` were removed upstream; the password methods
+prefer `searchLoginsAsync()`/`addLoginAsync()` and fall back to the old names.
+Reading `account.defaultIdentity` on an account without identities throws on
+some versions rather than returning null, so identity setup is wrapped — a
+failure there must not lose the account key, or the node becomes unreachable.
 
 Four things separate a bare account node from one that feels native, and all four need XPCOM:
 
@@ -479,6 +504,25 @@ Both builds carry the add-on ID `thunderbird-eas@woehrl.biz`, and `_ensureTbAcco
 | `rev_mapping_{accountId}` | Thunderbird message id → `{ easFolderId, easServerId }` |
 
 The maps are loaded once per session, held in memory and flushed at the end of a cycle. The previous implementation did a read-modify-write of two storage keys per imported message, making the first sync of a large folder quadratic in storage operations.
+
+### Surviving a reinstall
+
+Removing a WebExtension wipes `storage.local`, while the Thunderbird account
+node lives in the mail profile and survives. Without a second copy, a reinstall
+loses the account — including the DeviceId, and a new DeviceId is a new device
+partnership: another slot of a quota that is commonly five, plus a fresh
+quarantine cycle.
+
+The configuration is therefore mirrored onto the server node as
+`eas_account_data` (never the password — that is in the password manager and
+survives on its own), written only when the serialised value actually changed.
+A leftover node carrying a usable copy offers **Restore** on the setup page
+alongside **Delete**, and restoring keeps the original DeviceId.
+
+For nodes predating the mirroring the DeviceId is gone from storage but the
+user still has it, from the server's quarantine notification or the OWA device
+list — so the setup page accepts an existing Device ID instead of always
+generating one.
 
 ### Account shape
 
@@ -538,9 +582,10 @@ Remaining weaknesses:
 
 | Issue | Note |
 |---|---|
-| **Full content sync against a released device** | Provisioning, FolderSync, folder creation, special-folder tagging and a single-message Sync are confirmed against a live Exchange 2019. Everything beyond that — bulk sync, paging via `MoreAvailable`, truncation and `ItemOperations/Fetch`, read-flag propagation, `SendMail`, the Ping loop — has only been exercised against the self-test, because the device is still in quarantine and Exchange withholds content. |
+| **Untested paths** | Confirmed live against Exchange 2019: provisioning, FolderSync, folder creation and tagging, message sync across nine folders, the Ping loop, `SendMail`, and move/delete mirroring. Still only exercised against the self-test: attachments in both directions, truncation with `ItemOperations/Fetch`, `MoreAvailable` paging on a large folder, throttling (HTTP 503) and redirects (HTTP 451). |
 | **Capture a real Outlook session** | The reference document describes a mitmproxy setup driven by repointing Outlook's `EAS Server URL` registry value. That would settle header order, heartbeat and the provisioning sequence — replacing several reconstructions with measurements. The quarantine notification has already confirmed DeviceType, User-Agent and negotiated version. |
-| **Surface the quarantine state** | A quarantined device provisions and receives its folder tree, so the add-on reports a healthy account with an almost empty mailbox. Exchange offers no protocol-level signal for this; the only marker is the notification message itself. Worth considering: flag an account that has folders but has imported nothing but a single message from the server's own notification sender. |
+| **Surface the quarantine state** | A quarantined device provisions and receives its folder tree, so the add-on reports a healthy account with an almost empty mailbox. Exchange offers no protocol-level signal for this; the only marker is the notification message itself. A synced-message count per account would at least make the situation legible without claiming to detect it. |
+| **Re-adopt a duplicate on import** | Thunderbird refuses to import a message whose `Message-ID` already exists in the target folder, and the item is then left with no mapping — it can no longer be moved, deleted or flagged through the add-on. Recovering it means locating the existing message with `messages.query({folderId, headerMessageId})` and registering the ServerId against it. |
 | **Outgoing mail via drafts** | `SendMail` works, but composing into the Drafts folder (16.x `Sync/Add`) is not implemented. |
 | **Message list goes stale after an import** | Observed once: importing into the folder currently displayed left the thread pane showing only the newly imported message. The data was intact — switching folders and back restored the full list — so this is a view refresh problem, not loss. Not attributed yet; `messages.import()` is the only thing this add-on does to a folder. Worth discriminating: does it also happen when the target folder is *not* the one on screen? |
 
@@ -550,7 +595,6 @@ Remaining weaknesses:
 |---|---|
 | Calendar sync | Code page 4 is now correct and complete. Needs `MeetingRequest` handling and timezone normalisation; recurrences drift by an hour across DST transitions when the server sends no timezone blob. |
 | Contacts sync | Code page 1 is correct. The Thunderbird address-book API is limited; may need XPCOM. |
-| `MoveItems` wiring | `buildMoveItems` exists but is not connected to Thunderbird's move/drag events. |
 | OAuth 2.0 | Required for Exchange Online, along with protocol 16.1. Both are large. |
 | Search / `Find` | Not implemented. The reference server advertises `Find`, so 16.1 search is available in principle. |
 

@@ -243,8 +243,15 @@ export class SyncManager {
       if (!sync) return {};   // not ours — let Thunderbird send it normally
 
       try {
-        const mime = await this._buildMime(tab);
+        const composeDetails = await messenger.compose.getComposeDetails(tab.id);
+        const mime = await this._buildMime(tab, composeDetails);
         await sync.sendMail(mime);
+
+        // Thunderbird removes the draft as part of its own post-send cleanup,
+        // which a cancelled send skips — so a message composed from a draft
+        // stays in Drafts after it has gone out. Deleting it moves it to the
+        // trash, which onMoved then mirrors to the server.
+        this._discardSentDraft(composeDetails);
 
         // Cancelling is how the SMTP send is suppressed, but Thunderbird reads
         // a cancelled send as "the user changed their mind" and leaves the
@@ -281,8 +288,30 @@ export class SyncManager {
     return null;
   }
 
-  async _buildMime(tab) {
-    const details     = await messenger.compose.getComposeDetails(tab.id);
+  /**
+   * Remove the draft a sent message was composed from.
+   *
+   * `type` and `relatedMessageId` are not guaranteed across Thunderbird
+   * versions, so what was actually seen is logged — an unexpected shape shows
+   * up as a log line rather than as a draft that quietly refuses to go away.
+   */
+  _discardSentDraft(details) {
+    const draftId = details?.relatedMessageId;
+    if (details?.type !== 'draft' || !draftId) {
+      if (details?.type === 'draft') {
+        console.warn('[EAS] compose was a draft but carried no relatedMessageId — not removed');
+      }
+      return;
+    }
+
+    setTimeout(() => {
+      messenger.messages.delete([draftId], { deletePermanently: false })
+        .catch(e => console.warn('[EAS] could not remove the sent draft:', e.message));
+    }, 0);
+  }
+
+  async _buildMime(tab, prefetched = null) {
+    const details     = prefetched || await messenger.compose.getComposeDetails(tab.id);
     const attachments = await messenger.compose.listAttachments(tab.id);
 
     const isHtml = details.isPlainText === false;
@@ -322,7 +351,7 @@ export class SyncManager {
     ].join('\r\n'));
 
     for (const attachment of attachments) {
-      const file = await attachment.getFile();
+      const file = await readComposeAttachment(attachment);
       const name = file.name || attachment.name || 'attachment';
       parts.push([
         `--${boundary}`,
@@ -345,14 +374,12 @@ export class SyncManager {
 
   _listenMessages() {
     if (messenger.messages.onUpdated) {
-      messenger.messages.onUpdated.addListener(async (msg, props) => {
+      messenger.messages.onUpdated.addListener((msg, props) => {
         if (!('read' in props)) return;
+        // Just queue it; the batch is sent after a short debounce, and any
+        // failure is logged from there.
         for (const [, sync] of this.syncs) {
-          try {
-            if (await sync.propagateReadFlag(msg.id, props.read)) break;
-          } catch (e) {
-            console.warn('[EAS] read-flag propagation failed:', e.message);
-          }
+          if (sync.propagateReadFlag(msg.id, props.read)) break;
         }
       });
     }
@@ -361,17 +388,25 @@ export class SyncManager {
     // onMoved. onDeleted only fires on permanent removal, so listening to it
     // alone means an ordinary delete never reaches the server — the message
     // disappears locally and stays put in OWA.
+    // Both events deliver whole batches — a multi-select delete arrives as one
+    // event, not one per message. Passing the batch through keeps it one
+    // request per collection on the wire; fanning out per message is what
+    // earned an X-MS-ASThrottle: RecentCommands from Exchange.
     if (messenger.messages.onMoved) {
       messenger.messages.onMoved.addListener(async (originals, moved) => {
         const from = originals?.messages || originals || [];
         const to   = moved?.messages || moved || [];
+        const pairs = [];
         for (let i = 0; i < from.length && i < to.length; i++) {
-          for (const [, sync] of this.syncs) {
-            try {
-              if (await sync.propagateMove(from[i].id, to[i])) break;
-            } catch (e) {
-              console.warn('[EAS] move propagation failed:', e.message);
-            }
+          pairs.push({ oldId: from[i].id, moved: to[i] });
+        }
+        if (!pairs.length) return;
+
+        for (const [, sync] of this.syncs) {
+          try {
+            if (await sync.propagateMoves(pairs)) break;
+          } catch (e) {
+            this._log(sync.account.id, [`move propagation failed: ${e.message}`]);
           }
         }
       });
@@ -379,13 +414,14 @@ export class SyncManager {
 
     if (messenger.messages.onDeleted) {
       messenger.messages.onDeleted.addListener(async messages => {
-        for (const msg of messages?.messages || messages || []) {
-          for (const [, sync] of this.syncs) {
-            try {
-              if (await sync.propagateDelete(msg.id)) break;
-            } catch (e) {
-              console.warn('[EAS] delete propagation failed:', e.message);
-            }
+        const ids = (messages?.messages || messages || []).map(m => m.id);
+        if (!ids.length) return;
+
+        for (const [, sync] of this.syncs) {
+          try {
+            if (await sync.propagateDeletes(ids)) break;
+          } catch (e) {
+            this._log(sync.account.id, [`delete propagation failed: ${e.message}`]);
           }
         }
       });
@@ -825,6 +861,28 @@ export class SyncManager {
 // ─────────────────────────────────────────────────────────────────────
 // MIME helpers
 // ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Read the contents of a compose attachment.
+ *
+ * `ComposeAttachment.getFile()` no longer exists in current Thunderbird — the
+ * replacement is `compose.getAttachmentFile(id)`. Trying it first and keeping
+ * the method as a fallback covers both, and a missing attachment is named in
+ * the error rather than surfacing as "getFile is not a function".
+ */
+async function readComposeAttachment(attachment) {
+  if (typeof messenger.compose.getAttachmentFile === 'function') {
+    return await messenger.compose.getAttachmentFile(attachment.id);
+  }
+  if (typeof attachment.getFile === 'function') {
+    return await attachment.getFile();
+  }
+  throw new Error(
+    `cannot read the attachment "${attachment.name || attachment.id}" — ` +
+    'this Thunderbird version exposes neither compose.getAttachmentFile() nor ' +
+    'ComposeAttachment.getFile()'
+  );
+}
 
 /**
  * Quoted-printable encoder.

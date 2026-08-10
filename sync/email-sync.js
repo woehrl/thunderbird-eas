@@ -50,6 +50,15 @@ function folderIdOf(container) {
 
 /** How long to stay quiet after the server refused the device. */
 const BLOCKED_BACKOFF_MS = 30 * 60 * 1000;
+/**
+ * Read-flag changes are collected for this long before being sent.
+ *
+ * Thunderbird fires messages.onUpdated once per message, so scrolling through
+ * a thread or selecting a screenful and marking it read produces a burst. One
+ * request per message is what earns an `X-MS-ASThrottle: RecentCommands` from
+ * Exchange; batching collapses the burst into a single Sync per collection.
+ */
+const READ_FLAG_DEBOUNCE_MS = 3000;
 /** Cap on Sync round trips per folder per cycle, so a server that keeps
  *  answering MoreAvailable cannot spin forever. */
 const MAX_SYNC_PAGES = 200;
@@ -161,10 +170,23 @@ export class AccountSync {
     // behind it until they hit their own timeout — which is what "the
     // operation was aborted" in the log actually was.
     this._dropCurrentPing();
+    return this._enqueue(() => this._syncSerialised(opts));
+  }
 
-    const previous = this._pendingSync || Promise.resolve();
-    const next = previous.catch(() => {}).then(() => this._syncSerialised(opts));
-    this._pendingSync = next.catch(() => {});
+  /**
+   * Serialise everything that touches a collection's sync key.
+   *
+   * Sync cycles, moves, deletes and read-flag batches all advance sync keys.
+   * Two of them in flight against the same collection race: the server answers
+   * the second with status 3 and the collection is rebuilt from scratch. The
+   * periodic alarm, the push loop and Thunderbird's message events are three
+   * independent sources of such calls, so the ordering has to be imposed here
+   * rather than hoped for.
+   */
+  _enqueue(task) {
+    const previous = this._pending || Promise.resolve();
+    const next = previous.catch(() => {}).then(task);
+    this._pending = next.catch(() => {});
     return next;
   }
 
@@ -559,125 +581,218 @@ export class AccountSync {
     await this.client.sendMail(mimeData, { saveInSent: true });
   }
 
-  /** Push a local read/unread change back to the server. */
-  async propagateReadFlag(tbMessageId, read) {
+  /**
+   * Queue a read/unread change. Sent in a batch, see READ_FLAG_DEBOUNCE_MS.
+   *
+   * @returns {boolean} whether this account owns the message
+   */
+  propagateReadFlag(tbMessageId, read) {
     const mapping = this._getReverseMapping(tbMessageId);
     if (!mapping) return false;
 
-    const folderInfo = this.account.folders?.[mapping.easFolderId];
-    if (!folderInfo || folderInfo.syncKey === '0') return false;
+    const pending = (this._pendingReadFlags ||= new Map());
+    const perCollection = pending.get(mapping.easFolderId) || new Map();
+    perCollection.set(mapping.easServerId, read);
+    pending.set(mapping.easFolderId, perCollection);
 
-    const { doc } = await this.client.request('Sync', buildSync({
-      syncKey:      folderInfo.syncKey,
-      collectionId: folderInfo.serverId,
-      easVersion:   this.client.easVersion,
-      // Suppress the server's own changes: this request exists to push one
-      // flag, and any items returned here would be acknowledged by the new
-      // sync key without ever being imported.
-      getChanges:   false,
-      readChanges:  [{ serverId: mapping.easServerId, read }],
-    }));
+    clearTimeout(this._readFlagTimer);
+    this._readFlagTimer = setTimeout(
+      () => this._enqueue(() => this._flushReadFlags()), READ_FLAG_DEBOUNCE_MS);
 
-    const parsed = parseSync(doc);
-    const collection = parsed?.collections?.find(c => c.collectionId === folderInfo.serverId)
-      || parsed?.collections?.[0];
-    if (collection?.syncKey) {
-      folderInfo.syncKey = collection.syncKey;
-      await this._saveAccount();
-    }
-
-    const failed = collection?.responses?.find(r => r.status && r.status !== STATUS.SUCCESS);
-    if (failed) this.log(`read-flag change rejected with status ${failed.status}`);
-    return !failed;
-  }
-
-  /**
-   * Mirror a local folder move onto the server.
-   *
-   * This is also how deletion arrives. Thunderbird's Delete moves a message to
-   * the trash folder and fires onMoved; onDeleted is only for permanent
-   * removal. Exchange sees it the same way — deleting is a move to Deleted
-   * Items — so both map onto MoveItems.
-   *
-   * MoveItems is used rather than a Sync <Delete> even for the trash, because
-   * its response carries the new ServerId. That lets the mapping be updated
-   * straight away, so when the destination collection later reports the item
-   * as an Add it is recognised instead of imported a second time.
-   *
-   * @param {number} oldTbMessageId  id before the move
-   * @param {object} movedMessage    MessageHeader after the move
-   * @returns {Promise<boolean>} true if this account owned the message
-   */
-  async propagateMove(oldTbMessageId, movedMessage) {
-    const mapping = this._getReverseMapping(oldTbMessageId);
-    if (!mapping) return false;
-
-    const source = this.account.folders?.[mapping.easFolderId];
-    const destinationFolderId = movedMessage?.folder?.id || movedMessage?.folderId || null;
-    const destination = Object.values(this.account.folders || {})
-      .find(f => f.thunderbirdFolderId === destinationFolderId);
-
-    if (!destination) {
-      // Moved out of this account entirely — into Local Folders, say. Mirroring
-      // that as a server-side delete would be a guess with destructive
-      // consequences, so the mapping is simply dropped.
-      this.log('message moved outside the account — not mirrored to the server');
-      this._removeMapping(mapping.easFolderId, mapping.easServerId);
-      await this._flushMaps();
-      return true;
-    }
-
-    if (destination.serverId === mapping.easFolderId) return true;   // nothing moved
-
-    const { doc } = await this.client.request('MoveItems', buildMoveItems([{
-      srcMsgId: mapping.easServerId,
-      srcFldId: mapping.easFolderId,
-      dstFldId: destination.serverId,
-    }]));
-
-    const [response] = parseMoveItems(doc);
-    // Move status 3 is success. 1 means "invalid source collection or item not
-    // found" — the one command in this protocol where status 1 is a failure.
-    if (!response || response.status !== '3') {
-      this.log(`move to "${destination.displayName}" rejected with status ${response?.status ?? '?'}`);
-      return true;
-    }
-
-    this._removeMapping(mapping.easFolderId, mapping.easServerId);
-    if (response.dstMsgId) {
-      this._setMapping(destination.serverId, response.dstMsgId, movedMessage.id);
-    }
-    await this._flushMaps();
-
-    this.log(`moved a message from "${source?.displayName ?? mapping.easFolderId}" ` +
-             `to "${destination.displayName}" on the server`);
     return true;
   }
 
-  /** Push a permanent local deletion back to the server. */
-  async propagateDelete(tbMessageId) {
-    const mapping = this._getReverseMapping(tbMessageId);
-    if (!mapping) return false;
+  async _flushReadFlags() {
+    const pending = this._pendingReadFlags;
+    if (!pending?.size) return;
+    this._pendingReadFlags = new Map();
 
-    const folderInfo = this.account.folders?.[mapping.easFolderId];
-    if (!folderInfo || folderInfo.syncKey === '0') return false;
+    for (const [collectionId, changes] of pending) {
+      const folderInfo = this.account.folders?.[collectionId];
+      if (!folderInfo || folderInfo.syncKey === '0') continue;
 
-    const { doc } = await this.client.request('Sync', buildSync({
-      syncKey:      folderInfo.syncKey,
-      collectionId: folderInfo.serverId,
-      easVersion:   this.client.easVersion,
-      getChanges:   false,
-      deleteIds:    [mapping.easServerId],
-    }));
+      const readChanges = [...changes].map(([serverId, read]) => ({ serverId, read }));
 
-    const parsed = parseSync(doc);
-    const collection = parsed?.collections?.[0];
-    if (collection?.syncKey) {
-      folderInfo.syncKey = collection.syncKey;
-      this._removeMapping(mapping.easFolderId, mapping.easServerId);
-      await this._flushMaps();
-      await this._saveAccount();
+      const { doc } = await this.client.request('Sync', buildSync({
+        syncKey:      folderInfo.syncKey,
+        collectionId: folderInfo.serverId,
+        easVersion:   this.client.easVersion,
+        // Suppress the server's own changes: this request exists to push flags,
+        // and items returned here would be acknowledged by the new sync key
+        // without ever being imported.
+        getChanges:   false,
+        readChanges,
+      }));
+
+      const parsed = parseSync(doc);
+      const collection = parsed?.collections?.find(c => c.collectionId === folderInfo.serverId)
+        || parsed?.collections?.[0];
+      if (collection?.syncKey) {
+        folderInfo.syncKey = collection.syncKey;
+        await this._saveAccount();
+      }
+
+      const failed = collection?.responses?.filter(r => r.status && r.status !== STATUS.SUCCESS);
+      if (failed?.length) {
+        this.log(`${failed.length} of ${readChanges.length} read-flag changes rejected in ` +
+                 `"${folderInfo.displayName}"`);
+      } else {
+        this.log(`pushed ${readChanges.length} read-flag change(s) in "${folderInfo.displayName}"`);
+      }
     }
+  }
+
+  /**
+   * Mirror local folder moves onto the server, one MoveItems per source and
+   * destination pair.
+   *
+   * This is also how deletion arrives. Thunderbird's Delete moves a message to
+   * the trash folder and fires onMoved; onDeleted is only for permanent
+   * removal. Exchange takes the same view — deleting is a move to Deleted Items
+   * — so both map onto MoveItems.
+   *
+   * MoveItems is used rather than a Sync <Delete> even for the trash, because
+   * its response carries the new ServerId. Updating the mapping straight away
+   * means the destination collection's later Add is recognised instead of
+   * imported a second time.
+   *
+   * @param {Array<{oldId: number, moved: object}>} pairs
+   * @returns {Promise<boolean>} whether this account owned any of them
+   */
+  async propagateMoves(pairs) {
+    const owned = pairs.filter(({ oldId }) => this._getReverseMapping(oldId));
+    if (!owned.length) return false;
+
+    const groups = new Map();   // "src>dst" → { source, destination, moves }
+
+    for (const { oldId, moved } of owned) {
+      const mapping = this._getReverseMapping(oldId);
+
+      const destinationFolderId = moved?.folder?.id || moved?.folderId || null;
+      const destination = Object.values(this.account.folders || {})
+        .find(f => f.thunderbirdFolderId === destinationFolderId);
+
+      if (!destination) {
+        // Moved out of this account entirely — into Local Folders, say.
+        // Mirroring that as a server-side delete would be a guess with
+        // destructive consequences, so the mapping is simply dropped.
+        this.log('message moved outside the account — not mirrored to the server');
+        this._removeMapping(mapping.easFolderId, mapping.easServerId);
+        continue;
+      }
+      if (destination.serverId === mapping.easFolderId) continue;
+
+      const key = `${mapping.easFolderId}>${destination.serverId}`;
+      const group = groups.get(key) || { source: mapping.easFolderId, destination, moves: [] };
+      group.moves.push({ mapping, newTbId: moved.id });
+      groups.set(key, group);
+    }
+
+    if (!groups.size) {
+      await this._flushMaps();
+      return true;
+    }
+
+    await this._enqueue(async () => {
+      for (const group of groups.values()) {
+        const { doc } = await this.client.request('MoveItems', buildMoveItems(
+          group.moves.map(m => ({
+            srcMsgId: m.mapping.easServerId,
+            srcFldId: m.mapping.easFolderId,
+            dstFldId: group.destination.serverId,
+          }))));
+
+        const responses = parseMoveItems(doc);
+        let moved = 0;
+
+        for (const m of group.moves) {
+          const response = responses.find(r => r.srcMsgId === m.mapping.easServerId);
+          // Move reports success as status 3. This is the one command in the
+          // protocol where status 1 means failure.
+          if (!response || response.status !== '3') {
+            this.log(`move of ${m.mapping.easServerId} rejected with status ${response?.status ?? '?'}`);
+            continue;
+          }
+          this._removeMapping(m.mapping.easFolderId, m.mapping.easServerId);
+          if (response.dstMsgId) {
+            this._setMapping(group.destination.serverId, response.dstMsgId, m.newTbId);
+          }
+          moved++;
+        }
+
+        await this._flushMaps();
+        const sourceName = this.account.folders?.[group.source]?.displayName || group.source;
+        this.log(`moved ${moved} message(s) from "${sourceName}" to ` +
+                 `"${group.destination.displayName}" on the server`);
+      }
+    });
+
+    return true;
+  }
+
+  /**
+   * Push permanent deletions back to the server, batched per collection.
+   *
+   * This is the path for deleting something already in the trash, or for
+   * Shift+Delete. `DeletesAsMoves` is switched **off** here: with it on, the
+   * server is asked to move the item to Deleted Items — which for an item
+   * already sitting there is a no-op it acknowledges cheerfully, so the message
+   * disappears locally and stays put in OWA.
+   */
+  async propagateDeletes(tbMessageIds) {
+    const byCollection = new Map();
+
+    for (const tbMessageId of tbMessageIds) {
+      const mapping = this._getReverseMapping(tbMessageId);
+      if (!mapping) continue;
+      const list = byCollection.get(mapping.easFolderId) || [];
+      list.push(mapping.easServerId);
+      byCollection.set(mapping.easFolderId, list);
+    }
+
+    if (!byCollection.size) return false;
+
+    await this._enqueue(async () => {
+      for (const [collectionId, serverIds] of byCollection) {
+        const folderInfo = this.account.folders?.[collectionId];
+        if (!folderInfo) {
+          this.log(`delete not mirrored: no folder for collection ${collectionId}`);
+          continue;
+        }
+        if (folderInfo.syncKey === '0') {
+          this.log(`delete not mirrored: "${folderInfo.displayName}" has not synced yet`);
+          continue;
+        }
+
+        const { doc } = await this.client.request('Sync', buildSync({
+          syncKey:        folderInfo.syncKey,
+          collectionId:   folderInfo.serverId,
+          easVersion:     this.client.easVersion,
+          getChanges:     false,
+          deletesAsMoves: false,
+          deleteIds:      serverIds,
+        }));
+
+        const parsed = parseSync(doc);
+        const collection = parsed?.collections?.find(c => c.collectionId === folderInfo.serverId)
+          || parsed?.collections?.[0];
+
+        if (collection?.syncKey) {
+          folderInfo.syncKey = collection.syncKey;
+          for (const serverId of serverIds) this._removeMapping(collectionId, serverId);
+          await this._flushMaps();
+          await this._saveAccount();
+        }
+
+        const failed = collection?.responses?.filter(r => r.status && r.status !== STATUS.SUCCESS);
+        if (failed?.length) {
+          this.log(`${failed.length} delete(s) rejected in "${folderInfo.displayName}"`);
+        } else {
+          this.log(`deleted ${serverIds.length} message(s) in "${folderInfo.displayName}" on the server`);
+        }
+      }
+    });
+
     return true;
   }
 
@@ -709,7 +824,7 @@ export class AccountSync {
       if (this.isBackingOff()) { await this._sleep(60000, signal); continue; }
 
       // Never park a long poll while a sync cycle is in flight.
-      await this._pendingSync?.catch(() => {});
+      await this._pending?.catch(() => {});
       if (!this.pushing || signal.aborted) break;
 
       let folders = this._mailFolders().map(f => ({ id: f.serverId, class: 'Email' }));

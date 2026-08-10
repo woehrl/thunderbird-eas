@@ -230,11 +230,17 @@ Exchange kann Clients anhand von `DeviceType` und `User-Agent` sperren (Allow/Bl
 
 | Profil | Empfehlung |
 |---|---|
-| **Outlook Desktop (Windows)** | **Standard.** Nachweislich akzeptiert. Verhandelt Protokoll 14.0, weil echtes Outlook genau das tut. |
-| **iPhone (iOS Mail)** | Zweite nachweislich akzeptierte Variante |
-| **Thunderbird (honest)** | Ehrlich, kann aber an einer Sperrliste scheitern |
-| **Android Mail** | Wurde in der Referenzmessung mit 403 abgewiesen |
+| **Thunderbird** | **Standard.** Sagt, was es ist. Gegen den Referenzserver erfolgreich. |
+| **Outlook Desktop (Windows)** | Nachahmung. Rückfallebene, wenn der Server nur bekannte Clients zulässt. Verhandelt 14.0, weil echtes Outlook das tut. |
+| **iPhone (iOS Mail)** | Zweite Nachahmung, ebenfalls akzeptiert |
+| **Android Mail** | Nachahmung, in der Referenzmessung mit 403 abgewiesen |
 | **Custom…** | Nur wenn Du einen Wert kennst, der beim Server durchgeht |
+
+Das Standardprofil sendet den User-Agent `Thunderbird-EAS/1.0` — **ohne** Thunderbird-Versionsnummer.
+Das ist Absicht: Server dürfen den User-Agent laut Spezifikation über Requests hinweg verfolgen und
+Geräte sperren, die ihn zu oft ändern, und Thunderbirds Version ändert sich mit jedem Update. Die
+laufende Version wird stattdessen als Gerätename übermittelt und erscheint in der OWA-Geräteliste
+als `Thunderbird 153.0.2 (adresse@firma.org)` — dort sind Änderungen vorgesehen.
 
 > **Wichtig:** Exchange identifiziert ein Gerät über `DeviceId` **und** `DeviceType`. Wechselst Du das Profil später, entsteht eine **zusätzliche** Gerätepartnerschaft und verbraucht einen weiteren Platz des Kontingents. Der alte Eintrag muss in OWA von Hand gelöscht werden. Also lieber einmal richtig wählen.
 
@@ -248,6 +254,8 @@ Aufklappen über **Advanced**.
 | **Sync messages from** | Begrenzt, wie weit der Erstabgleich zurückreicht. Bei sehr großen Postfächern erst *Last month* nehmen, später auf *All* stellen. |
 | **Credential encoding** | Nur bei Umlauten im Kennwort relevant. Wenn ein korrektes Kennwort als falsch abgelehnt wird: auf *ISO-8859-1* stellen. Das ist die Kodierung, die echtes Outlook sendet. |
 | **Push (Ping)** | An lassen. Der Server hält die Verbindung offen und meldet Änderungen sofort. |
+| **Device ID** | Leer lassen erzeugt eine neue. Trägst Du eine vorhandene ein, hängt sich das Konto an eine Gerätepartnerschaft, die der Server schon kennt — sinnvoll nach einer Neuinstallation oder in einem zweiten Profil. Spart einen Kontingentplatz und eine neue Quarantäne. Die ID steht in der Quarantäne-Benachrichtigung und in der OWA-Geräteliste. |
+| **Mailbox address** | Nur nötig, wenn der Anmeldename keine Adresse ist. |
 
 ### Geräteprofile vergleichen (nur bei Problemen)
 
@@ -302,6 +310,47 @@ vorname@firma.org                   Lokale Ordner
 Beim Privileged-Build tragen Posteingang, Gesendet, Entwürfe und Papierkorb echte Thunderbird-Ordnerkennzeichen — richtige Symbole, Löschen wandert in den Papierkorb, Gesendetes wird dort abgelegt.
 
 **Mails schreiben:** Ganz normal über *Verfassen*. Das Add-on fängt den Versand ab und schickt die Nachricht über EAS `SendMail` statt SMTP. Ein SMTP-Server muss nicht konfiguriert sein.
+
+---
+
+## Verschieben und Löschen
+
+Beides wird auf den Server gespiegelt, und zwar über dasselbe EAS-Kommando.
+
+**Löschen ist Verschieben.** Thunderbirds Löschen legt die Nachricht in den
+Papierkorb — für Exchange ist das ein Verschieben nach *Gelöschte Elemente*, also
+genau dasselbe. Endgültiges Löschen (Umschalt+Entf) wird als echtes Löschen
+weitergereicht.
+
+**Verschieben zwischen EAS-Ordnern** landet ebenfalls auf dem Server.
+
+**Verschieben aus dem Konto heraus** — etwa in *Lokale Ordner* — wird bewusst
+**nicht** gespiegelt. Ob das ein Löschen sein soll, ist nicht erkennbar, und die
+falsche Annahme wäre nicht rückgängig zu machen. Die Serverkopie bleibt also
+liegen; wer sie loswerden will, löscht sie in OWA.
+
+Für Nachrichten, die vor der Einrichtung des Add-ons schon lokal lagen, gibt es
+keine Zuordnung zur Serverkopie. Sie lassen sich lokal löschen, aber nicht über
+das Add-on auf dem Server.
+
+---
+
+## Übrig gebliebene Kontoknoten
+
+Thunderbird bietet für Konten dieser Bauart kein *Löschen* an. Bleibt nach einer
+abgebrochenen Einrichtung — oder nach einer Neuinstallation des Add-ons, die den
+Add-on-Speicher leert, während der Knoten im Mail-Profil überlebt — ein Eintrag
+im Ordnerbaum stehen, kommst Du über Thunderbird nicht mehr an ihn heran.
+
+Die Einrichtungsseite zeigt solche Knoten unter **Leftover account nodes**:
+
+| Knopf | Wirkung |
+|---|---|
+| **Restore** | Holt das Konto samt **originaler DeviceId** zurück. Der Server sieht dasselbe Gerät wie zuvor — keine neue Partnerschaft, keine neue Quarantäne. Nur verfügbar, wenn der Knoten eine brauchbare Kopie der Konfiguration trägt. |
+| **Delete node** | Entfernt den Knoten **samt der darin gespeicherten Mails**. |
+
+Trägt ein alter Knoten keine Kopie, hilft der Umweg über *Advanced → Device ID*:
+Knoten löschen, Konto neu anlegen und dabei die alte Geräte-ID eintragen.
 
 ---
 
