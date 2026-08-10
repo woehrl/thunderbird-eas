@@ -38,15 +38,20 @@ Exchange Online is **not** supported: it has required EAS 16.1 with OAuth 2.0 si
 
 ## Installation
 
-Two builds are produced from identical source:
+Each release ships two builds from identical source, on the [Releases](../../releases) page:
 
 | File | Description |
 |---|---|
-| `thunderbird-eas-x.y.z-<ts>.xpi` | **Standard** — installs anywhere, files mail under Local Folders |
-| `thunderbird-eas-x.y.z-privileged-<ts>.xpi` | **Privileged** — real account node; needs one about:config change first |
+| `thunderbird-eas-<version>.xpi` | **Standard** — installs anywhere, files mail under Local Folders |
+| `thunderbird-eas-<version>-privileged.xpi` | **Privileged** — real account node; needs one about:config change first (see below) |
 
-1. In Thunderbird: **Tools → Add-ons and Themes → gear icon → Install Add-on From File**
-2. Pick the `.xpi` and confirm.
+1. Download the `.xpi` you want from the latest release. **For the privileged build, do the about:config step under "Standard vs privileged build" first** — otherwise Thunderbird refuses the install.
+2. In Thunderbird: **Tools → Add-ons and Themes → gear icon → Install Add-on From File**.
+3. Pick the `.xpi` and confirm.
+
+The add-on is unsigned. Thunderbird shows an "unverified" warning on install, and on builds that enforce signatures you first need `xpinstall.signatures.required = false` in about:config. See [Signing and distribution](#signing-and-distribution).
+
+To update, install the new `.xpi` over the existing one — do not remove the old one first, or the DeviceId is lost. See [Updating](#updating).
 
 ### Build from source
 
@@ -245,6 +250,19 @@ Local Folders                     user@domain.org      ← its own account node
 | HTTP 503 | Throttling | Backoff honouring `Retry-After` |
 
 ---
+
+## Signing and distribution
+
+The `.xpi` files are **unsigned**. For your own mailbox that is fine: Thunderbird shows an "unverified" warning, and on builds that enforce signatures you set `xpinstall.signatures.required = false` in about:config once. Signing only matters for removing that warning, enabling automatic updates, or distributing to other people.
+
+There is no self-service signing key. Thunderbird add-ons are signed by **addons.thunderbird.net (ATN)** when you submit them there, and unlike Firefox's AMO there is (as far as is known here — verify against current ATN docs) no unlisted self-distribution signing.
+
+Two things make signing this add-on harder than usual:
+
+- **The privileged build is an experiment extension.** ATN reviews `experiment_apis` add-ons far more strictly, and even a normally signed experiment extension still needs `extensions.experiments.enabled = true` on the user's side — the signature does not lift that. Only a special *privileged* signature would, and ATN grants it rarely. So the standard build could realistically be signed and distributed; the privileged build stays a manual install.
+- **It is an EAS client.** This is the licensing situation from [Patents](#limitations) turned concrete: a publicly listed EAS client is exactly the category Microsoft's patent programme names, and ATN reviewers may raise it for the same reason. Publishing is what makes the question real, so settle it before investing effort.
+
+For a single-user private install, staying on the about:config setting is the pragmatic choice.
 
 ## Limitations
 
