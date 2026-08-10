@@ -316,7 +316,7 @@ export const DEVICE_PROFILES = [
   },
   {
     id:           'Android',
-    label:        'Android Mail (Samsung) — imitation, was rejected',
+    label:        'Android Mail (Samsung) — imitation, untested',
     deviceType:   'Android',
     userAgent:    'Android-Mail/2026.03.09.884664556.Release',
     model:        'SM-G975F',
@@ -327,7 +327,15 @@ export const DEVICE_PROFILES = [
     windowSize:   100,
     sendSettings: true,
     verified:     false,
-    note:         'Returned HTTP 403 in the reference measurement, though the mailbox device quota was exhausted at the time. Little reason to prefer it.',
+    // The reference measurement's HTTP 403 for this DeviceType was the
+    // exhausted device quota plus status 165, the same conditions that made
+    // the honest Thunderbird profile look blocked — so it says nothing about
+    // whether the server accepts Android. Real Android devices connect over
+    // EAS every day. Not verified against the reference server; a plain,
+    // unremarkable device type with no reason to prefer or avoid it.
+    note:         'A common, unremarkable device type. Its 403 in the reference measurement was the ' +
+                  'device quota, not the DeviceType — the same cause that made the Thunderbird profile ' +
+                  'look blocked. Not verified here, but Android clients connect over EAS routinely.',
   },
 ];
 

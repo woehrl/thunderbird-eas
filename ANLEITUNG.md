@@ -233,7 +233,7 @@ Exchange kann Clients anhand von `DeviceType` und `User-Agent` sperren (Allow/Bl
 | **Thunderbird** | **Standard.** Sagt, was es ist. Gegen den Referenzserver erfolgreich. |
 | **Outlook Desktop (Windows)** | Nachahmung. Rückfallebene, wenn der Server nur bekannte Clients zulässt. Verhandelt 14.0, weil echtes Outlook das tut. |
 | **iPhone (iOS Mail)** | Zweite Nachahmung, ebenfalls akzeptiert |
-| **Android Mail** | Nachahmung, in der Referenzmessung mit 403 abgewiesen |
+| **Android Mail** | Nachahmung, nicht gegen den Referenzserver geprüft |
 | **Custom…** | Nur wenn Du einen Wert kennst, der beim Server durchgeht |
 
 Das Standardprofil sendet den User-Agent `Thunderbird-EAS/1.0` — **ohne** Thunderbird-Versionsnummer.

@@ -1,0 +1,47 @@
+name: Release
+
+# Fires when a version tag is pushed, e.g. `git tag v1.1.0 && git push origin v1.1.0`.
+# Builds both .xpi variants and attaches them to a GitHub release for that tag.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # needed to create the release and upload assets
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # The tag drives the release, but Thunderbird decides what is an update
+      # from the manifest version. If they disagree, a published package would
+      # not upgrade the way the tag implies — so fail loudly instead.
+      - name: Check tag matches manifest version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          MANIFEST=$(node -p "require('./manifest.json').version")
+          echo "tag=$TAG  manifest=$MANIFEST"
+          if [ "$TAG" != "$MANIFEST" ]; then
+            echo "::error::Tag v$TAG does not match manifest version $MANIFEST"
+            exit 1
+          fi
+
+      # Runs the protocol self-test as part of packaging and aborts on failure.
+      - name: Build both variants
+        run: |
+          node package.js --release
+          node package.js --release --privileged
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.xpi
+          generate_release_notes: true
+          fail_on_unmatched_files: true

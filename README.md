@@ -61,6 +61,21 @@ node package.js --privileged # privileged build
 
 No npm, no bundler, no dependencies — plain ES modules and Node's standard library.
 
+Local builds carry a timestamp in the filename so repeated builds don't collide with a locked file; `--release` drops it for a stable asset name.
+
+### Cutting a release
+
+Releases are built by GitHub Actions, not uploaded by hand — the `.xpi` is then provably built from the tagged commit, with the self-test as part of it.
+
+1. Bump `version` in `manifest.json`, commit, push.
+2. Tag it and push the tag:
+   ```bash
+   git tag v1.1.0
+   git push origin v1.1.0
+   ```
+
+The workflow checks the tag against the manifest version (a mismatch fails the build, since Thunderbird decides updates from the manifest), builds both variants with `--release`, and attaches `thunderbird-eas-<version>.xpi` and `thunderbird-eas-<version>-privileged.xpi` to a new GitHub release for the tag.
+
 ---
 
 ## Standard vs privileged build

@@ -108,6 +108,10 @@ function walk(dir, base = '') {
 
 const privileged = process.argv.includes('--privileged');
 const skipTests  = process.argv.includes('--skip-selftest');
+// A release build produces a stable filename without the timestamp. The
+// timestamp exists only so repeated local builds do not collide with a file
+// Windows still has locked; a release wants a predictable asset name.
+const release    = process.argv.includes('--release');
 
 // The protocol self-test guards the WBXML code page tables. A shifted table
 // produces requests that servers reject with a generic error and is otherwise
@@ -151,7 +155,8 @@ const distDir = path.join(root, 'dist');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
 const version = manifest.version;
 const suffix  = privileged ? '-privileged' : '';
-const out     = path.join(distDir, `thunderbird-eas-${version}${suffix}-${Date.now()}.xpi`);
+const stamp   = release ? '' : `-${Date.now()}`;
+const out     = path.join(distDir, `thunderbird-eas-${version}${suffix}${stamp}.xpi`);
 const zip     = new ZipWriter();
 const skip    = new Set([
   'package.js', 'README.md', 'DEVELOPMENT.md', 'ANLEITUNG.md', 'LICENSE',

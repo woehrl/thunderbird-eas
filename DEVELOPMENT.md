@@ -204,7 +204,7 @@ A profile bundles `DeviceType`, `User-Agent`, `maxVersion`, `windowSize` and whe
 | `Thunderbird` (default) | `Thunderbird` | 14.1 | accepted |
 | `WindowsOutlook15` | `WindowsOutlook15` | 14.0 | accepted |
 | `iPhone` | `iPhone` | 14.1 | accepted |
-| `Android` | `Android` | 14.1 | returned 403 |
+| `Android` | `Android` | 14.1 | untested |
 
 Version and DeviceType are coupled on purpose. Outlook's EAS stack is an Outlook 2013 legacy component that negotiates exactly 14.0 — a client calling itself `WindowsOutlook15` and asking for 16.1 is a fingerprint that exists nowhere.
 
